@@ -52,10 +52,10 @@
       .hero{position:relative;overflow:hidden;border-bottom:1px solid var(--line-soft);background:var(--bg-2)}
       .hero-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 62%;opacity:.48}
       .hero-shade{position:absolute;inset:0;background:linear-gradient(180deg,rgba(4,6,12,.78) 0%,rgba(4,6,12,.52) 44%,rgba(4,6,12,.96) 100%)}
-      .hero-inner{position:relative;padding:52px 0 52px;text-align:left}
+      .hero-inner{position:relative;padding:52px 20px;text-align:left}
       .eyebrow{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(212,175,55,.45);color:var(--gold-2);background:rgba(4,6,12,.62);padding:7px 12px;border-radius:999px;font-size:.72rem;font-weight:800;letter-spacing:.18em;text-transform:uppercase}
       .eyebrow::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--gold);flex:none}
-      .brand{margin-top:18px;font-size:clamp(2.35rem,9vw,4.2rem);font-weight:800;line-height:.98;max-width:100%;overflow-wrap:break-word}
+      .brand{margin-top:18px;font-size:clamp(2rem,5.5vw,3rem);font-weight:800;line-height:1.04;letter-spacing:-.02em;max-width:100%;overflow-wrap:break-word}
       .brand span{color:var(--gold)}
       .hero-sub{margin-top:16px;max-width:620px;font-size:clamp(1rem,2.6vw,1.22rem);color:#d6dce9;font-weight:500;line-height:1.55;text-wrap:pretty}
       .hero-sub strong{color:#fff}
@@ -63,7 +63,7 @@
       .hero-points span{border:1px solid var(--line);background:rgba(10,15,30,.72);color:var(--silver);border-radius:999px;padding:7px 12px;font-size:.84rem;font-weight:700}
 
       /* TRACK */
-      .track-card{margin-top:28px;background:rgba(8,12,24,.92);border:1px solid var(--line);border-top:3px solid var(--gold);border-radius:var(--radius);padding:22px;max-width:760px;box-shadow:var(--shadow);width:100%}
+      .track-card{margin:28px auto 0;background:rgba(8,12,24,.92);border:1px solid var(--line);border-top:3px solid var(--gold);border-radius:var(--radius);padding:22px;max-width:760px;box-shadow:var(--shadow);width:100%}
       .track-card h2{font-size:1.28rem;margin-bottom:6px}
       .track-card .hint{color:var(--muted);font-size:.93rem;margin-bottom:16px;line-height:1.55}
       .track-form{display:flex;gap:10px;width:100%}
@@ -202,7 +202,7 @@
         .steps,.modes,.assurance{grid-template-columns:1fr}
         .products{grid-template-columns:1fr 1fr}
         .adm-grid,.auth-grid{grid-template-columns:1fr}
-        .hero-inner{padding:40px 0 42px}
+        .hero-inner{padding:40px 20px 42px}
         section.block{padding:44px 0}
       }
       @media (max-width:640px){
@@ -215,7 +215,7 @@
         .topnav .cta{padding:8px 11px}
         .topnav a.nav-hide{display:none}
         .user-chip #chipName{display:none}
-        .brand{font-size:clamp(1.85rem,8.5vw,2.4rem);line-height:1.02}
+        .brand{font-size:clamp(1.6rem,7vw,1.9rem);line-height:1.05}
         .track-card{padding:18px}
         .track-form{flex-direction:column}
         .track-form .btn{width:100%}
