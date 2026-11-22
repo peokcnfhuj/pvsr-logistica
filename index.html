@@ -107,6 +107,14 @@
       .detail-grid dd{margin:3px 0 0;font-weight:600;color:var(--ink);overflow-wrap:anywhere}
       .sync-note{margin-top:14px;font-size:.86rem;color:var(--muted-2);line-height:1.5}
       .sync-note b{color:var(--silver);font-weight:700}
+      .app-live{margin-top:18px;background:var(--gold-dim);border:1px solid rgba(212,175,55,.35);border-radius:12px;padding:14px 16px;display:none}
+      .app-live.show{display:block}
+      .app-live p{color:var(--silver);font-size:.93rem;line-height:1.55;margin-bottom:12px}
+      .app-live p b{color:var(--gold-2)}
+      .app-live .btn{width:100%}
+      .app-live .app-frame-wrap{margin-bottom:12px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#0a0f1e}
+      .app-live .app-frame-wrap iframe{display:block;width:100%;height:480px;border:0;background:#0a0f1e}
+      .app-live .app-frame-fallback{margin:10px 0 0;text-align:center;color:var(--muted);font-size:.85rem}
 
       /* SECTIONS */
       section.block{padding:58px 0}
@@ -217,6 +225,7 @@
         .user-chip #chipName{display:none}
         .brand{font-size:clamp(1.6rem,7vw,1.9rem);line-height:1.05}
         .track-card{padding:18px}
+        .app-live .app-frame-wrap iframe{height:420px}
         .track-form{flex-direction:column}
         .track-form .btn{width:100%}
         .timeline .lbl{font-size:.58rem}
@@ -261,9 +270,9 @@
 
         <div class="track-card" id="rastreio">
           <h2>Rastreie sua encomenda</h2>
-          <p class="hint">Cole o link de rastreio PVSR que você recebeu, ou só o código dele — o final do link, depois de <span class="mono">?r=</span>.</p>
+          <p class="hint">Cole o link de rastreio PVSR que você recebeu, ou só o código dele — o final do link, depois de <span class="mono">?r=</span>. Também vale colar direto o link de rastreio do aplicativo (Lalamove, Uber ou 99).</p>
           <form class="track-form" id="trackForm">
-            <input type="text" id="trackInput" placeholder="Cole o link ou o código de rastreio PVSR" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Link ou código de rastreio PVSR" />
+            <input type="text" id="trackInput" placeholder="Cole o link PVSR, o código, ou o link do aplicativo" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Link PVSR, código, ou link de rastreio do aplicativo" />
             <button class="btn btn-gold" type="submit">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
               Rastrear
@@ -289,6 +298,14 @@
             </dl>
             <p id="resObs" style="margin-top:16px;color:var(--muted);display:none"></p>
             <p class="sync-note" id="resSync" style="display:none"></p>
+            <div class="app-live" id="resAppLive">
+              <p id="resAppText"></p>
+              <div class="app-frame-wrap" id="resAppFrameWrap" style="display:none">
+                <iframe id="resAppFrame" title="Rastreio ao vivo — Lalamove" loading="lazy" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+              </div>
+              <a class="btn btn-gold" id="resAppBtn" href="#" target="_blank" rel="noopener">Ver rastreio ao vivo</a>
+              <p class="app-frame-fallback" id="resAppFallback" style="display:none">Se o mapa não carregar aqui, abrir no aplicativo</p>
+            </div>
           </div>
         </div>
       </div>
@@ -441,7 +458,7 @@
               <p class="ok-msg show" style="margin:0 0 18px">Adm conectado. Preencha o envio e gere o link PVSR do cliente.</p>
               <div class="output-box" style="margin-bottom:22px">
                 <div class="cap">Sincronização automática do rastreio — Super Frete</div>
-                <p class="adm-note" style="margin-bottom:0">A sincronização agora roda no servidor do site: o token da API da Super Frete fica guardado no painel da Vercel (variável de ambiente <span class="mono">SUPERFRETE_TOKEN</span>) e nunca aparece nesta página. Ao abrir um rastreio, o site consulta a Super Frete pelo código do envio e mostra o status mais recente na hora, em qualquer aparelho, sem você mudar nada na mão. Sem o envio na Super Frete (ou se a consulta falhar), vale o status que você marcar no formulário, com a data da última atualização.</p>
+                <p class="adm-note" style="margin-bottom:0">A sincronização agora roda no servidor do site: o token da API da Super Frete fica guardado no painel da Vercel (variável de ambiente <span class="mono">SUPERFRETE_TOKEN</span>) e nunca aparece nesta página. Ao abrir um rastreio, o site consulta a Super Frete pelo código do envio e mostra o status mais recente na hora, em qualquer aparelho, sem você mudar nada na mão. Sem o envio na Super Frete (ou se a consulta falhar), vale o status que você marcar no formulário, com a data da última atualização. Entregas por aplicativo (Uber, 99, Lalamove) não usam a Super Frete: o cliente acompanha pelo link do aplicativo, colado no campo próprio do formulário — para Lalamove, com o ID do pedido o status também aparece dentro do site (precisa das chaves da API da Lalamove guardadas na Vercel).</p>
               </div>
               <div class="adm-grid">
                 <form id="shipForm">
@@ -452,11 +469,13 @@
                     <div class="field"><label for="fDestino">Destino</label><input type="text" id="fDestino" placeholder="Ex.: Salvador, BA" required /></div>
                   </div>
                   <div class="two">
-                    <div class="field"><label for="fTransportadora">Transportadora</label><input type="text" id="fTransportadora" placeholder="Ex.: Jadlog, Correios, Azul Cargo…" required /></div>
+                    <div class="field"><label for="fTransportadora">Transportadora</label><input type="text" id="fTransportadora" placeholder="Ex.: Lalamove, Uber Moto, 99 Moto, Jadlog, Correios…" required /></div>
                     <div class="field"><label for="fCodTransp">Código na transportadora</label><input type="text" id="fCodTransp" placeholder="Código do frete emitido" /></div>
                     <div class="field"><label for="fCodSF">Código Super Frete</label><input type="text" id="fCodSF" placeholder="Ex.: SLGE5HGESUGJJ — o código do envio na Super Frete" /><p class="micro">É este código que a sincronização automática usa. O código da transportadora continua aparecendo para o cliente, mas não serve para a consulta.</p></div>
                   </div>
                   <div class="field"><label for="fLinkTransp">Link de rastreio da transportadora</label><input type="url" id="fLinkTransp" placeholder="Cole aqui o link que a transportadora gerou" /><p class="micro">Fica guardado dentro do link PVSR — o cliente acompanha pelo site da PVSR, sem precisar abrir o site da transportadora.</p></div>
+                  <div class="field"><label for="fAppLink">Link de rastreio do aplicativo (Uber / 99 / Lalamove)</label><input type="url" id="fAppLink" placeholder="Cole o link que o aplicativo gerou para esta entrega" /><p class="micro">Para entregas de moto por aplicativo: Lalamove (link Compartilhar), Uber (link da viagem compartilhada ou do pedido) ou 99 (link recebido por SMS). O cliente acompanha o mapa ao vivo pelo botão no cartão de rastreio dele — o link oficial do aplicativo abre numa nova aba.</p></div>
+                  <div class="field"><label for="fAppOrderId">ID do pedido no aplicativo (opcional)</label><input type="text" id="fAppOrderId" placeholder="Só Lalamove: o ID numérico do pedido" /><p class="micro">Só para Lalamove: o ID numérico do pedido (12 a 19 dígitos), que aparece no app da Lalamove. Com ele, o status da entrega também aparece dentro do site da PVSR; sem ele, o cliente acompanha só pelo link do aplicativo. Uber e 99 ainda não têm essa consulta dentro do site.</p></div>
                   <div class="two">
                     <div class="field"><label for="fStatus">Status atual do envio</label><select id="fStatus"><option value="0">Objeto em preparo</option><option value="1">Esperando a transportadora</option><option value="2">Objeto postado</option><option value="3">Coletado pela transportadora</option><option value="4" selected>Em trânsito</option><option value="5">Saiu para entrega</option><option value="6">Entregue</option></select></div>
                     <div class="field"><label for="fPrevisao">Previsão de entrega</label><input type="date" id="fPrevisao" /></div>
@@ -482,7 +501,7 @@
                   </div>
                 </div>
               </div>
-              <p class="adm-note" style="margin-top:16px">Passo a passo: 1) emita o frete na transportadora e copie o link dela · 2) cole o link no formulário e preencha os dados · 3) gere e mande o link PVSR ao cliente · 4) o cliente abre o link e o site já mostra o status mais recente da Super Frete, conferido pelo servidor — sem você fazer nada.</p>
+              <p class="adm-note" style="margin-top:16px">Passo a passo: 1) emita o frete na transportadora e copie o link dela · 2) cole o link no formulário e preencha os dados · 3) gere e mande o link PVSR ao cliente · 4) o cliente abre o link e o site já mostra o status mais recente da Super Frete, conferido pelo servidor — sem você fazer nada. Para entregas por aplicativo, cole o link do aplicativo no campo próprio: o cliente acompanha o mapa ao vivo pelo botão no cartão de rastreio.</p>
             </div>
           </div>
         </div>
@@ -722,6 +741,42 @@
           if(m) return m[1];
           return s.replace(/\s+/g,"");
         }
+        /* ---------- entregas por aplicativo (Uber / 99 / Lalamove) ----------
+           Nenhum dos três tem página pública de rastreio por código: o
+           destinatário acompanha por um LINK ao vivo gerado por entrega.
+           Por isso o site NUNCA constrói URL de rastreio à mão a partir de
+           um código — só usa o link que foi colado (pelo Adm no formulário
+           ou pelo cliente no campo de rastreio). O serviço é detectado pelo
+           domínio do link: share.lalamove.com = Lalamove; trip.uber.com,
+           m.uber.com e ubereats.com = Uber. A 99 NÃO publica o domínio do
+           link que manda por SMS — por isso qualquer outro link colado no
+           campo de rastreio é tratado como 99 (o campo só aceita links
+           desses três aplicativos). */
+        var APP_NAMES={"lalamove":"Lalamove","uber":"Uber","99":"99"};
+        function detectAppCarrier(link){
+          var u=null; try{ u=new URL(String(link||"").trim()); }catch(e){ return ""; }
+          var h=(u.hostname||"").toLowerCase();
+          if(h.indexOf("lalamove.com")!==-1) return "lalamove";
+          if(h.indexOf("uber.com")!==-1||h.indexOf("ubereats.com")!==-1) return "uber";
+          return "99";
+        }
+        function detectAppLink(raw){
+          var s=String(raw||"").trim();
+          if(!/^https?:\/\//i.test(s)) return "";
+          var u=null; try{ u=new URL(s); }catch(e){ return ""; }
+          var h=(u.hostname||"").toLowerCase();
+          if(h.indexOf("lalamove.com")!==-1) return "lalamove";
+          if(h.indexOf("uber.com")!==-1||h.indexOf("ubereats.com")!==-1) return "uber";
+          return "99";
+        }
+        function appCodeFromLink(link){
+          try{
+            var u=new URL(String(link||"").trim());
+            var q=(u.search||"").replace(/^\?/,"");
+            if(!q) return "";
+            return decodeURIComponent(q.split("&")[0].split("=")[0]||"").trim();
+          }catch(e){ return ""; }
+        }
         function fmtDate(iso){
           if(!iso) return "A confirmar";
           var d=new Date(iso+"T12:00:00"); if(isNaN(d.getTime())) return iso;
@@ -759,9 +814,37 @@
           if(data.obs){ obs.textContent=data.obs; obs.style.display="block"; } else { obs.style.display="none"; }
           var syncEl=$("resSync");
           syncEl.style.display="none"; syncEl.textContent="";
+          var appBox=$("resAppLive");
+          appBox.classList.remove("show");
+          var frameWrap=$("resAppFrameWrap"), frameEl=$("resAppFrame"), fbEl=$("resAppFallback");
+          /* Lalamove não bloqueia incorporação (sem X-Frame-Options nem
+             frame-ancestors, confirmado nos cabeçalhos e no corpo da
+             página): o mapa abre embutido aqui mesmo, parecendo nativo.
+             Uber (SAMEORIGIN) e 99 (domínio desconhecido) ficam só no
+             botão — nunca embutir link que não seja da Lalamove. */
+          var isLala=data.appLink && data.appCarrier==="lalamove" && /^https?:\/\//i.test(String(data.appLink)) && /lalamove\.com/i.test(String(data.appLink));
+          if(!isLala){ frameWrap.style.display="none"; frameEl.removeAttribute("src"); fbEl.style.display="none"; }
+          var tlEl=$("resTimeline"); tlEl.style.display="";
+          if(data.appLink && /^https?:\/\//i.test(String(data.appLink))){
+            var appName=APP_NAMES[data.appCarrier]||"aplicativo";
+            if(isLala){
+              $("resAppText").innerHTML="O mapa ao vivo desta entrega aparece aqui mesmo, dentro da página da PVSR Logística.";
+              if(frameEl.getAttribute("src")!==data.appLink) frameEl.src=data.appLink;
+              frameWrap.style.display="block";
+              fbEl.style.display="block";
+            } else {
+              $("resAppText").innerHTML="O mapa ao vivo desta entrega é o do aplicativo <b>"+escHtml(appName)+"</b>. Toque no botão para abrir o rastreio oficial — o status acima é o que a PVSR registrou para este envio.";
+            }
+            var appBtn=$("resAppBtn"); appBtn.href=data.appLink; appBtn.textContent="Ver rastreio ao vivo — "+appName;
+            appBox.classList.add("show");
+          }
+          if(data.appOnly){
+            $("resStatus").textContent="Entrega por aplicativo";
+            tlEl.style.display="none";
+          }
           $("trackResult").classList.add("show");
           $("trackError").classList.remove("show");
-          if(!skipSync) syncFromCarrier(data,status);
+          if(!skipSync){ if(data.appLink) syncAppLink(data,status); else syncFromCarrier(data,status); }
         }
 
         /* ---------- sincronização automática com a Super Frete ----------
@@ -823,8 +906,54 @@
               .catch(fail);
           }catch(e){ fail(); }
         }
+        /* ---------- link de aplicativo colado direto no campo ----------
+           O cliente cola o link que recebeu (Lalamove, Uber ou 99) e vê o
+           cartão da entrega com o botão do mapa ao vivo — sem inventar
+           status: o status real está no aplicativo. Para Lalamove, o site
+           ainda tenta a API oficial com o código do link (só funciona se as
+           chaves da Lalamove estiverem na Vercel); se der certo, o cartão
+           ganha o status ao vivo; se não der, continua só o link. */
+        function renderAppLinkCard(link,carrier,scroll){
+          var name=APP_NAMES[carrier]||"aplicativo";
+          var data={v:2,ref:"—",cliente:"—",produto:"Entrega por aplicativo — "+name,origem:"—",destino:"—",transportadora:name,codTransp:"—",s:1,previsao:"",obs:"",atualizado:todayBR(),appLink:link,appCarrier:carrier,appOrderId:"",appOnly:true};
+          renderTracking(data,true);
+          syncAppLink(data,1);
+          if(scroll) $("trackResult").scrollIntoView({behavior:"smooth",block:"center"});
+        }
+        function syncAppLink(data,currentStatus){
+          /* Uber e 99: só o link — as APIs deles são de conta empresa e o
+             dono ainda não tem credencial. Lalamove: tenta a API oficial
+             (função /api/track?lalamove=...) com o ID do pedido, se o Adm
+             digitou, ou com o código do link compartilhado (melhor esforço:
+             se a Lalamove não reconhecer o código, vale só o link). */
+          if(data.appCarrier!=="lalamove") return;
+          var orderId=String(data.appOrderId||"").trim()||appCodeFromLink(data.appLink);
+          if(!orderId) return;
+          var el=$("resSync"); el.style.display="block"; el.textContent="Conferindo o status na Lalamove…";
+          var nowLabel=new Date().toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
+          fetch("/api/track?lalamove="+encodeURIComponent(orderId),{method:"GET",headers:{"Accept":"application/json"}})
+            .then(function(r){ if(!r.ok) throw new Error("http"); return r.json(); })
+            .then(function(j){
+              if(!j||j.state!=="live") throw new Error("nolive");
+              var nd={}; for(var k in data) nd[k]=data[k];
+              nd.v=2; nd.s=j.status; nd.appOnly=false; nd.atualizado=nowLabel;
+              if(j.shareLink) nd.appLink=j.shareLink;
+              renderTracking(nd,true);
+              var el2=$("resSync"); el2.style.display="block";
+              el2.innerHTML="Status conferido na Lalamove em "+nowLabel+" — está atualizado.";
+            })
+            .catch(function(){
+              var el3=$("resSync"); el3.style.display="block";
+              el3.textContent="O mapa ao vivo desta entrega está aqui mesmo nesta página. Se ele não carregar, toque em “Ver rastreio ao vivo”.";
+            });
+        }
         function tryTrack(raw,scroll){
           var token=extractToken(raw); if(!token) return false;
+          var s=String(raw||"").trim();
+          if(!/[?&#]r=/.test(s)){
+            var appC=detectAppLink(token);
+            if(appC){ renderAppLinkCard(token,appC,scroll); return true; }
+          }
           try{
             var data=decodeData(token);
             if(!data||typeof data!=="object"||!("cliente" in data)) throw new Error("bad");
@@ -893,11 +1022,15 @@
             codTransp:$("fCodTransp").value.trim(),
             codSF:$("fCodSF").value.trim(),
             linkTransp:$("fLinkTransp").value.trim(),
+            appLink:(function(){var l=$("fAppLink").value.trim();return /^https?:\/\//i.test(l)?l:"";})(),
+            appCarrier:"",
+            appOrderId:$("fAppOrderId").value.trim(),
             s:parseInt($("fStatus").value,10),
             previsao:$("fPrevisao").value,
             obs:$("fObs").value.trim(),
             atualizado:todayBR()
           };
+          if(data.appLink) data.appCarrier=detectAppCarrier(data.appLink);
           var token=encodeData(data);
           lastCode=token;
           lastLink=pageBaseUrl()+"?r="+token;
