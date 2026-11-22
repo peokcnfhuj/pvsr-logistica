@@ -454,6 +454,7 @@
                   <div class="two">
                     <div class="field"><label for="fTransportadora">Transportadora</label><input type="text" id="fTransportadora" placeholder="Ex.: Jadlog, Correios, Azul Cargo…" required /></div>
                     <div class="field"><label for="fCodTransp">Código na transportadora</label><input type="text" id="fCodTransp" placeholder="Código do frete emitido" /></div>
+                    <div class="field"><label for="fCodSF">Código Super Frete</label><input type="text" id="fCodSF" placeholder="Ex.: SLGE5HGESUGJJ — o código do envio na Super Frete" /><p class="micro">É este código que a sincronização automática usa. O código da transportadora continua aparecendo para o cliente, mas não serve para a consulta.</p></div>
                   </div>
                   <div class="field"><label for="fLinkTransp">Link de rastreio da transportadora</label><input type="url" id="fLinkTransp" placeholder="Cole aqui o link que a transportadora gerou" /><p class="micro">Fica guardado dentro do link PVSR — o cliente acompanha pelo site da PVSR, sem precisar abrir o site da transportadora.</p></div>
                   <div class="two">
@@ -774,7 +775,7 @@
         function escHtml(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
         var syncBusy=false;
         function syncFromCarrier(data,currentStatus){
-          var code=(data.codTransp||"").trim();
+          var code=(data.codSF||data.codTransp||"").trim();
           if(!code||syncBusy) return;
           syncBusy=true;
           var el=$("resSync");
@@ -830,7 +831,30 @@
             renderTracking(data);
             if(scroll) $("trackResult").scrollIntoView({behavior:"smooth",block:"center"});
             return true;
-          }catch(e){ return false; }
+          }catch(e){
+            // Código Super Frete cru (ex.: SLGE5HGESUGJJ) colado direto:
+            // não é um link PVSR, então consulta a função e mostra o ao vivo.
+            return tryTrackByCode(token,scroll);
+          }
+        }
+        function tryTrackByCode(code,scroll){
+          var c=String(code||"").replace(/[\s-]/g,"").toUpperCase();
+          if(!/^[A-Z0-9]{6,64}$/.test(c)) return false;
+          var el=$("resSync"); el.style.display="block"; el.textContent="Conferindo o status na Super Frete…";
+          var nowLabel=new Date().toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
+          fetch("/api/track?code="+encodeURIComponent(c),{method:"GET",headers:{"Accept":"application/json"}})
+            .then(function(r){ if(!r.ok) throw new Error("http"); return r.json(); })
+            .then(function(j){
+              if(!j||j.state!=="live") throw new Error("notfound");
+              var data={v:2, ref:c, cliente:"—", produto:"Envio Super Frete", origem:j.origin||"—", destino:j.destination||"—", transportadora:j.carrier||"—", codTransp:c, s:j.status, previsao:j.eta||"", obs:"", atualizado:nowLabel};
+              renderTracking(data,true);
+              var msg="Status conferido na Super Frete em "+nowLabel+" — está atualizado.";
+              if(j.lastEvent&&j.lastEvent.label){ msg+=" Última movimentação: "+escHtml(j.lastEvent.label); if(j.lastEvent.city) msg+=" — "+escHtml(j.lastEvent.city); if(j.lastEvent.date) msg+=" ("+escHtml(j.lastEvent.date)+")"; msg+="."; }
+              el.innerHTML=msg;
+              if(scroll) $("trackResult").scrollIntoView({behavior:"smooth",block:"center"});
+            })
+            .catch(function(){ $("trackResult").classList.remove("show"); $("trackError").classList.add("show"); el.style.display="none"; });
+          return true;
         }
         $("trackForm").addEventListener("submit",function(ev){
           ev.preventDefault();
@@ -867,6 +891,7 @@
             destino:$("fDestino").value.trim(),
             transportadora:$("fTransportadora").value.trim(),
             codTransp:$("fCodTransp").value.trim(),
+            codSF:$("fCodSF").value.trim(),
             linkTransp:$("fLinkTransp").value.trim(),
             s:parseInt($("fStatus").value,10),
             previsao:$("fPrevisao").value,
