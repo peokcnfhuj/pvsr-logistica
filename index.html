@@ -441,13 +441,7 @@
               <p class="ok-msg show" style="margin:0 0 18px">Adm conectado. Preencha o envio e gere o link PVSR do cliente.</p>
               <div class="output-box" style="margin-bottom:22px">
                 <div class="cap">Sincronização automática do rastreio — Super Frete</div>
-                <p class="adm-note" style="margin-bottom:12px">Cole aqui o token da API da Super Frete — é uma vez só. Com o token salvo, ao abrir um rastreio <strong style="color:var(--silver)">neste aparelho</strong> o site consulta a Super Frete pelo código do envio e mostra o status mais recente na hora, sem você mudar nada na mão. A conferência automática roda no aparelho onde o token está salvo (o seu); no aparelho do cliente, vale o status gravado no link — quando você conferir um status novo aqui, gere o link de novo para o cliente ver a atualização. Sem token (ou se a consulta falhar), vale o status que você marcar no formulário, com a data da última atualização.</p>
-                <div class="field" style="margin-bottom:0"><label for="apiKey">Token da API da Super Frete</label><input type="password" id="apiKey" placeholder="Cole o token da Super Frete" autocomplete="off" /></div>
-                <div class="output-actions">
-                  <button class="btn btn-dark" type="button" id="saveApiBtn">Salvar token</button>
-                  <button class="btn btn-ghost" type="button" id="clearApiBtn">Remover token</button>
-                </div>
-                <p class="ok-msg" id="apiOk"></p>
+                <p class="adm-note" style="margin-bottom:0">A sincronização agora roda no servidor do site: o token da API da Super Frete fica guardado no painel da Vercel (variável de ambiente <span class="mono">SUPERFRETE_TOKEN</span>) e nunca aparece nesta página. Ao abrir um rastreio, o site consulta a Super Frete pelo código do envio e mostra o status mais recente na hora, em qualquer aparelho, sem você mudar nada na mão. Sem o envio na Super Frete (ou se a consulta falhar), vale o status que você marcar no formulário, com a data da última atualização.</p>
               </div>
               <div class="adm-grid">
                 <form id="shipForm">
@@ -487,7 +481,7 @@
                   </div>
                 </div>
               </div>
-              <p class="adm-note" style="margin-top:16px">Passo a passo: 1) emita o frete na transportadora e copie o link dela · 2) cole o link no formulário e preencha os dados · 3) gere e mande o link PVSR ao cliente · 4) com o token da Super Frete salvo acima, abrir o rastreio neste aparelho já confere o status na Super Frete; para o cliente ver a novidade, gere o link de novo com o status atualizado.</p>
+              <p class="adm-note" style="margin-top:16px">Passo a passo: 1) emita o frete na transportadora e copie o link dela · 2) cole o link no formulário e preencha os dados · 3) gere e mande o link PVSR ao cliente · 4) o cliente abre o link e o site já mostra o status mais recente da Super Frete, conferido pelo servidor — sem você fazer nada.</p>
             </div>
           </div>
         </div>
@@ -770,30 +764,18 @@
         }
 
         /* ---------- sincronização automática com a Super Frete ----------
-           Com o token da API da Super Frete salvo na Área do Adm, ao abrir o
-           rastreio o site consulta a API da Super Frete pelo código do envio
-           e atualiza o status sozinho. Sem token, ou se a consulta falhar,
-           fica o status manual do Adm e a data da última atualização já
-           exibida acima. */
-        var API_CFG_KEY="pvsr_logistica_tracking_api_v1";
-        function loadApiCfg(){ try{ var c=JSON.parse(storeGet(API_CFG_KEY)||"null"); return (c&&c.key)?c:null; }catch(e){ return null; } }
-        function mapSF(raw){
-          var s=String(raw||"").toLowerCase().trim().replace(/_/g," ");
-          if(!s) return -1;
-          if(s.indexOf("deliver")===0||s==="entregue") return 6;
-          if(s.indexOf("out for")===0||s.indexOf("saiu")===0) return 5;
-          if(s.indexOf("transit")>-1||s.indexOf("trânsito")>-1||s.indexOf("transito")>-1) return 4;
-          if(s.indexOf("collect")===0||s.indexOf("colet")===0) return 3;
-          if(s.indexOf("post")===0) return 2;
-          if(s.indexOf("released")===0||s.indexOf("liberad")===0||s.indexOf("aguardando")===0||s.indexOf("waiting")===0) return 1;
-          if(s.indexOf("pending")===0||s.indexOf("pendente")===0||s.indexOf("prepar")===0) return 0;
-          return -1;
-        }
+           O servidor do próprio site (função /api/track, na Vercel) guarda
+           o token da API da Super Frete como variável de ambiente e
+           consulta a Super Frete pelo código do envio. Ao abrir o rastreio,
+           o site chama /api/track e atualiza o status sozinho, em qualquer
+           aparelho — o token nunca aparece nesta página. Sem o envio na
+           Super Frete, ou se a consulta falhar, fica o status manual do
+           Adm e a data da última atualização já exibida acima. */
+        function escHtml(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
         var syncBusy=false;
         function syncFromCarrier(data,currentStatus){
-          var cfg=loadApiCfg();
           var code=(data.codTransp||"").trim();
-          if(!cfg||!code||syncBusy) return;
+          if(!code||syncBusy) return;
           syncBusy=true;
           var el=$("resSync");
           el.style.display="block"; el.textContent="Conferindo o status na Super Frete…";
@@ -806,26 +788,36 @@
             var b=document.createElement("b"); b.textContent=data.atualizado||"—";
             el.appendChild(b); el.appendChild(document.createTextNode("."));
           }
-          function apply(mapped){
+          function apply(live){
             clearTimeout(timer); syncBusy=false;
-            if(mapped<0){ fail(); return; }
-            if(mapped!==currentStatus){
-              var nd={}; for(var k in data) nd[k]=data[k];
-              nd.v=2; nd.s=mapped; nd.atualizado=nowLabel;
-              renderTracking(nd,true);
-              var el2=$("resSync"); el2.style.display="block";
-              el2.innerHTML="Status <b>atualizado automaticamente</b> a partir da Super Frete em "+nowLabel+".";
-            } else {
-              el.innerHTML="Status conferido na Super Frete em "+nowLabel+" — está atualizado.";
+            var mapped=live.status;
+            if(typeof mapped!=="number"||mapped<0||mapped>6){ fail(); return; }
+            var nd={}; for(var k in data) nd[k]=data[k];
+            nd.v=2; nd.s=mapped; nd.atualizado=nowLabel;
+            if(live.carrier) nd.transportadora=live.carrier;
+            if(live.origin) nd.origem=live.origin;
+            if(live.destination) nd.destino=live.destination;
+            if(live.eta) nd.previsao=live.eta;
+            var changed=(mapped!==currentStatus);
+            renderTracking(nd,true);
+            var el2=$("resSync"); el2.style.display="block";
+            var msg=changed?"Status <b>atualizado automaticamente</b> a partir da Super Frete em "+nowLabel+".":"Status conferido na Super Frete em "+nowLabel+" — está atualizado.";
+            if(live.lastEvent&&live.lastEvent.label){
+              msg+=" Última movimentação: "+escHtml(live.lastEvent.label);
+              if(live.lastEvent.city) msg+=" — "+escHtml(live.lastEvent.city);
+              if(live.lastEvent.date) msg+=" ("+escHtml(live.lastEvent.date)+")";
+              msg+=".";
             }
+            el2.innerHTML=msg;
           }
           try{
-            fetch("https://api.superfrete.com/public/v1/orders/"+encodeURIComponent(code),{method:"GET",headers:{"Authorization":"Bearer "+cfg.key,"Accept":"application/json"},signal:ctrl?ctrl.signal:undefined})
+            fetch("/api/track?code="+encodeURIComponent(code),{method:"GET",headers:{"Accept":"application/json"},signal:ctrl?ctrl.signal:undefined})
               .then(function(r){ if(!r.ok) throw new Error("http"); return r.json(); })
               .then(function(j){
-                var ord=(j&&(j.data||j.order||j))||{};
-                var st=ord.status||(ord.tracking&&ord.tracking.status);
-                apply(mapSF(st));
+                if(!j) { fail(); return; }
+                if(j.state==="live"){ apply(j); return; }
+                if(j.state==="no_token"){ clearTimeout(timer); syncBusy=false; el.style.display="none"; el.textContent=""; return; }
+                fail();
               })
               .catch(fail);
           }catch(e){ fail(); }
@@ -916,24 +908,10 @@
           if(window.__pvsrPreview){ renderTracking(window.__pvsrPreview); $("rastreio").scrollIntoView({behavior:"smooth",block:"start"}); }
         });
 
-        /* ---------- token da Super Frete (sincronização automática) ---------- */
-        (function initApiCfg(){
-          var cfg=loadApiCfg();
-          if(cfg){ $("apiKey").value=cfg.key||""; }
-          $("saveApiBtn").addEventListener("click",function(){
-            var key=$("apiKey").value.trim(); var ok=$("apiOk");
-            if(!key){ ok.textContent="Cole o token da Super Frete antes de salvar."; ok.classList.add("show"); return; }
-            storeSet(API_CFG_KEY,JSON.stringify({provider:"superfrete",key:key}));
-            ok.textContent="Token salvo neste aparelho. A partir de agora, abrir um rastreio confere o status na Super Frete automaticamente.";
-            ok.classList.add("show");
-          });
-          $("clearApiBtn").addEventListener("click",function(){
-            storeRemove(API_CFG_KEY); $("apiKey").value="";
-            var ok=$("apiOk");
-            ok.textContent="Token removido. O rastreio volta a usar só o status marcado no formulário.";
-            ok.classList.add("show");
-          });
-        })();
+        /* ---------- token da Super Frete ----------
+           O token não fica mais nesta página: ele é variável de ambiente
+           (SUPERFRETE_TOKEN) no painel da Vercel e só a função /api/track,
+           no servidor, lê ele. */
       })();
     </script>
   </body>
