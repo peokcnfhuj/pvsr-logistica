@@ -37,9 +37,41 @@
 // buscadas em paralelo; o resultado "live" de cada código também fica em
 // cache por 30 min. Já o "not_found" fica em cache só por 3 min — um envio
 // criado agora aparece no rastreio logo, sem ficar "escondido" por meia hora.
+//
+// ENTREGAS POR APLICATIVO (Uber / 99 / Lalamove):
+//   Nenhum dos três tem rastreio público por código: o destinatário
+//   acompanha por um LINK ao vivo por entrega. O site aceita esse link
+//   colado (pelo Adm ou pelo cliente) e mostra o cartão com o botão
+//   "Ver rastreio ao vivo" — o link oficial nunca é construído à mão.
+//   GET /api/track?lalamove=<id> — consulta a Lalamove API v3
+//     (GET /v3/orders/{orderId}, auth HMAC-SHA256). Só funciona com
+//     LALAMOVE_API_KEY e LALAMOVE_API_SECRET na Vercel; sem elas,
+//     {state:"no_token"} e o site mostra só o link. O <id> é o ID
+//     numérico do pedido (12 a 19 dígitos) ou, como melhor esforço,
+//     o código do shareLink (?BR...); se a Lalamove não reconhecer,
+//     {state:"not_found"}.
+//   GET /api/track?uber=<deliveryId> — Uber Direct API (OAuth 2.0,
+//     escopo eats.deliveries). DORMENTE: precisa de UBER_DIRECT_CLIENT_ID,
+//     UBER_DIRECT_CLIENT_SECRET e UBER_DIRECT_CUSTOMER_ID, que o dono
+//     ainda não tem. O código está pronto: basta criar as variáveis.
+//   GET /api/track?n99=<orderId> — 99Entrega API (OAuth 2.0, escopo
+//     entrega.order). DORMENTE: precisa de N99_CLIENT_ID e
+//     N99_CLIENT_SECRET, que o dono ainda não tem. Idem: basta criar.
+//   Status mapeados para os 7 do site (ver mapLalamoveStatus,
+//   mapUberStatus, map99Status). CANCELED/REJECTED/EXPIRED e outros
+//   sem correspondência devolvem {state:"error"} e o site mantém o
+//   status manual do Adm. Nenhuma credencial de aplicativo é lida
+//   no frontend: só aqui, no servidor, via variável de ambiente.
+
+const crypto = require("crypto");
 
 const SF_ORDERS_URL = "https://api.superfrete.com/api/v0/me/orders";
 const SF_ORDER_URL = "https://api.superfrete.com/api/v0/order/";
+const LALA_BASE = "https://rest.lalamove.com";
+const UBER_AUTH_URL = "https://auth.uber.com/oauth/v2/token";
+const UBER_API_BASE = "https://api.uber.com";
+const N99_AUTH_URL = "https://entrega.99app.com/entrega-openplatform/oauth/v2/token";
+const N99_API_BASE = "https://entrega.99app.com/entrega-openplatform";
 const USER_AGENT = "PVSR Logistica 1.0 (pedro.reis1@uscsonline.com.br)";
 
 // Orçamento total da função: o plano Hobby da Vercel limita a função a 10 s.
@@ -108,6 +140,223 @@ async function fetchWithRetry(url, headers, deadline) {
     }
   }
   throw lastError || new Error("fetch failed");
+}
+
+// Uma chamada JSON qualquer (GET ou POST): devolve {ok, status, body} sem
+// jogar erro em HTTP 4xx/5xx, para o chamador decidir (404 = não achado).
+async function fetchJsonOnce(url, options, timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+  try {
+    const r = await fetch(url, Object.assign({}, options, { signal: ctrl.signal }));
+    let body = null;
+    try { body = await r.json(); } catch (e) { body = null; }
+    return { ok: r.ok, status: r.status, body: body };
+  } finally { clearTimeout(timer); }
+}
+
+// Como fetchWithRetry, mas para as APIs dos aplicativos: repete uma vez só
+// em timeout; erro HTTP volta como {ok:false} para o chamador decidir.
+async function fetchJsonRetry(url, options, deadline) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 500) break;
+    const timeoutMs = Math.min(FETCH_TIMEOUT_MS, remaining);
+    try {
+      return await fetchJsonOnce(url, options, timeoutMs);
+    } catch (e) {
+      lastErr = e;
+      if (!e || e.name !== "AbortError") throw e;
+    }
+  }
+  throw lastErr || new Error("fetch failed");
+}
+
+/* ---------- Lalamove API v3 (ativa quando há credencial) ----------
+   Auth HMAC-SHA256 oficial: SIGNATURE =
+   HmacSHA256Hex(<TIMESTAMP>\r\n<MÉTODO>\r\n<PATH>\r\n\r\n<BODY>, SECRET);
+   header "Authorization: hmac <KEY>:<TIMESTAMP>:<SIGNATURE>", mais
+   "Market: BR" e "Request-ID: <nonce>". Chaves no Partner Portal da
+   Lalamove (aba Developers); produção em rest.lalamove.com. */
+function lalamoveSignature(secret, timestamp, method, path, body) {
+  const msg = timestamp + "\r\n" + method + "\r\n" + path + "\r\n" + "\r\n" + body;
+  return crypto.createHmac("sha256", secret).update(msg).digest("hex");
+}
+
+function mapLalamoveStatus(raw) {
+  const s = String(raw || "").toUpperCase().trim();
+  if (s === "COMPLETED") return 6;
+  if (s === "ON_GOING" || s === "PICKED_UP") return 4;
+  if (s === "ASSIGNING_DRIVER") return 1;
+  return -1; // CANCELED, REJECTED, EXPIRED e outros: sem correspondência
+}
+
+async function fetchLalamoveOrder(orderId, deadline) {
+  const key = process.env.LALAMOVE_API_KEY;
+  const secret = process.env.LALAMOVE_API_SECRET;
+  if (!key || !secret) return { state: "no_token" };
+  const path = "/v3/orders/" + encodeURIComponent(orderId);
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const requestId = crypto.randomUUID ? crypto.randomUUID() :
+    Date.now() + "-" + Math.random().toString(36).slice(2);
+  const signature = lalamoveSignature(secret, timestamp, "GET", path, "");
+  const headers = {
+    Authorization: "hmac " + key + ":" + timestamp + ":" + signature,
+    Market: "BR",
+    "Request-ID": requestId,
+    Accept: "application/json",
+  };
+  try {
+    const r = await fetchJsonRetry(LALA_BASE + path, { method: "GET", headers: headers }, deadline);
+    if (r.status === 404) return { state: "not_found" };
+    if (!r.ok || !r.body) return { state: "error" };
+    const d = (r.body && typeof r.body === "object")
+      ? (r.body.data && typeof r.body.data === "object" ? r.body.data : r.body) : {};
+    const status = mapLalamoveStatus(d.status);
+    if (status < 0) return { state: "error" };
+    const out = { state: "live", status: status, carrier: "lalamove" };
+    const share = firstString(d, ["shareLink"]);
+    if (share) out.shareLink = share;
+    return out;
+  } catch (e) {
+    return { state: "error" };
+  }
+}
+
+/* ---------- Uber Direct API (DORMENTE — sem credencial ainda) ----------
+   OAuth 2.0 client_credentials: POST auth.uber.com/oauth/v2/token
+   (grant_type=client_credentials, scope=eats.deliveries) e depois
+   GET api.uber.com/v1/customers/{customer_id}/deliveries/{delivery_id}.
+   Para ligar: criar UBER_DIRECT_CLIENT_ID, UBER_DIRECT_CLIENT_SECRET e
+   UBER_DIRECT_CUSTOMER_ID na Vercel (credenciais na aba Developer do
+   dashboard direct.uber.com). Sem elas, {state:"no_token"} e o site
+   mostra só o link. NÃO há API para o Uber Envios de consumidor. */
+let uberTokenCache = { token: null, expiresAt: 0 };
+
+async function uberDirectToken(deadline) {
+  const now = Date.now();
+  if (uberTokenCache.token && now < uberTokenCache.expiresAt) return uberTokenCache.token;
+  const clientId = process.env.UBER_DIRECT_CLIENT_ID;
+  const clientSecret = process.env.UBER_DIRECT_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+  const body = new URLSearchParams({
+    client_id: clientId, client_secret: clientSecret,
+    grant_type: "client_credentials", scope: "eats.deliveries",
+  }).toString();
+  const r = await fetchJsonRetry(UBER_AUTH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: body,
+  }, deadline);
+  if (!r.ok || !r.body || !r.body.access_token) throw new Error("uber token failed");
+  const expiresIn = parseInt(r.body.expires_in, 10);
+  uberTokenCache = {
+    token: r.body.access_token,
+    expiresAt: now + (isNaN(expiresIn) ? 3600 : expiresIn) * 1000 - 60000,
+  };
+  return uberTokenCache.token;
+}
+
+function mapUberStatus(raw) {
+  const s = String(raw || "").toLowerCase().trim();
+  if (s === "delivered") return 6;
+  if (s === "dropoff") return 5;
+  if (s === "pickup_complete") return 4;
+  if (s === "pickup") return 3;
+  if (s === "pending") return 1;
+  return -1; // canceled, returned e outros: sem correspondência
+}
+
+async function fetchUberDirectDelivery(deliveryId, deadline) {
+  const customerId = process.env.UBER_DIRECT_CUSTOMER_ID;
+  if (!customerId) return { state: "no_token" };
+  try {
+    const token = await uberDirectToken(deadline);
+    if (!token) return { state: "no_token" };
+    const r = await fetchJsonRetry(
+      UBER_API_BASE + "/v1/customers/" + encodeURIComponent(customerId) +
+      "/deliveries/" + encodeURIComponent(deliveryId),
+      { method: "GET", headers: { Authorization: "Bearer " + token, Accept: "application/json" } },
+      deadline);
+    if (r.status === 404) return { state: "not_found" };
+    if (!r.ok || !r.body) return { state: "error" };
+    const status = mapUberStatus(r.body.status);
+    if (status < 0) return { state: "error" };
+    const out = { state: "live", status: status, carrier: "uber" };
+    const tu = firstString(r.body, ["tracking_url"]);
+    if (tu) out.trackingUrl = tu;
+    const eta = firstString(r.body, ["dropoff_eta", "pickup_eta"]);
+    if (eta) out.eta = eta.slice(0, 10);
+    return out;
+  } catch (e) {
+    return { state: "error" };
+  }
+}
+
+/* ---------- 99Entrega API (DORMENTE — sem credencial ainda) ----------
+   OAuth 2.0 client_credentials: POST entrega.99app.com/entrega-openplatform/
+   oauth/v2/token (scope=entrega.order, token de 2h) e depois
+   GET .../v2/order/detail?order_id=<id> (ou ?external_order_id=).
+   Para ligar: criar N99_CLIENT_ID e N99_CLIENT_SECRET na Vercel
+   (conta de desenvolvedor no site da 99Entrega, com aprovação). Sem
+   elas, {state:"no_token"} e o site mostra só o link. NÃO há API para
+   corridas do app de passageiro comum — só para 99Entrega empresas. */
+let n99TokenCache = { token: null, expiresAt: 0 };
+
+async function n99Token(deadline) {
+  const now = Date.now();
+  if (n99TokenCache.token && now < n99TokenCache.expiresAt) return n99TokenCache.token;
+  const clientId = process.env.N99_CLIENT_ID;
+  const clientSecret = process.env.N99_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+  const body = new URLSearchParams({
+    client_id: clientId, client_secret: clientSecret,
+    grant_type: "client_credentials", scope: "entrega.order",
+  }).toString();
+  const r = await fetchJsonRetry(N99_AUTH_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body: body,
+  }, deadline);
+  if (!r.ok || !r.body || !r.body.access_token) throw new Error("99 token failed");
+  const expiresIn = parseInt(r.body.expires_in, 10);
+  n99TokenCache = {
+    token: r.body.access_token,
+    expiresAt: now + (isNaN(expiresIn) ? 7200 : expiresIn) * 1000 - 60000,
+  };
+  return n99TokenCache.token;
+}
+
+function map99Status(raw) {
+  const s = String(raw || "").toLowerCase().trim();
+  if (s === "completed") return 6;
+  if (s === "delivering" || s === "sendback") return 4;
+  if (s === "finding" || s === "waiting") return 1;
+  return -1; // canceled, closed, sendbackCompleted e outros: sem correspondência
+}
+
+async function fetch99Order(orderId, deadline) {
+  try {
+    const token = await n99Token(deadline);
+    if (!token) return { state: "no_token" };
+    const url = N99_API_BASE + "/v2/order/detail?order_id=" + encodeURIComponent(orderId);
+    const r = await fetchJsonRetry(url, {
+      method: "GET", headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+    }, deadline);
+    if (r.status === 404) return { state: "not_found" };
+    if (!r.ok || !r.body) return { state: "error" };
+    const d = (r.body && typeof r.body === "object")
+      ? (r.body.data && typeof r.body.data === "object" ? r.body.data : r.body) : {};
+    const status = map99Status(d.status);
+    if (status < 0) return { state: "error" };
+    const out = { state: "live", status: status, carrier: "99" };
+    const tl = firstString(d, ["tracking_link"]);
+    if (tl) out.trackingLink = tl;
+    return out;
+  } catch (e) {
+    return { state: "error" };
+  }
 }
 
 // Última página da lista, lida do meta da 1ª página ({data, meta:{last_page}}).
@@ -322,6 +571,41 @@ module.exports = async function handler(req, res) {
 
   if (req.method && req.method !== "GET") {
     return sendJson(res, 405, { state: "error" });
+  }
+
+  // Entregas por aplicativo (sem ?code=): ?lalamove=, ?uber= e ?n99=.
+  // Cada uma só consulta a API oficial quando as credenciais estão nas
+  // variáveis de ambiente; sem elas, {state:"no_token"} e o site mostra
+  // só o link do aplicativo (ver o comentário no topo do arquivo).
+  const lala = String((req.query && req.query.lalamove) || "").trim();
+  if (lala) {
+    if (!/^[A-Za-z0-9]{4,64}$/.test(lala)) return sendJson(res, 400, { state: "error" });
+    const key = "lala:" + lala;
+    const hit = resultCache.get(key);
+    if (hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
+    const out = await fetchLalamoveOrder(lala, deadline);
+    if (out.state === "live" || out.state === "not_found") cacheResult(key, out);
+    return sendJson(res, 200, out);
+  }
+  const uberId = String((req.query && req.query.uber) || "").trim();
+  if (uberId) {
+    if (!/^[A-Za-z0-9_\-]{3,64}$/.test(uberId)) return sendJson(res, 400, { state: "error" });
+    const key = "uber:" + uberId;
+    const hit = resultCache.get(key);
+    if (hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
+    const out = await fetchUberDirectDelivery(uberId, deadline);
+    if (out.state === "live" || out.state === "not_found") cacheResult(key, out);
+    return sendJson(res, 200, out);
+  }
+  const n99Id = String((req.query && req.query.n99) || "").trim();
+  if (n99Id) {
+    if (!/^[0-9]{6,20}$/.test(n99Id)) return sendJson(res, 400, { state: "error" });
+    const key = "n99:" + n99Id;
+    const hit = resultCache.get(key);
+    if (hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
+    const out = await fetch99Order(n99Id, deadline);
+    if (out.state === "live" || out.state === "not_found") cacheResult(key, out);
+    return sendJson(res, 200, out);
   }
 
   const code = normCode((req.query && req.query.code) || "");
