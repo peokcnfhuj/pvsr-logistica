@@ -18,16 +18,25 @@
 //   {state:"error"}     — a Super Frete falhou, demorou demais ou o status dela
 //                         não tem correspondência nos 7 do site.
 //
-// A lista de envios fica em cache em memória por 30 min (melhor esforço em
-// serverless: vale quando a instância está quente) e as páginas são buscadas
-// em paralelo; o resultado de cada código também fica em cache por 30 min —
-// consultas repetidas respondem na hora, sem chamar a API de novo.
+// FORMATO REAL CONFIRMADO (22/11/2026, chamada ao vivo):
+//   GET /api/v0/me/orders?page=N devolve {data:[...], meta:{total, per_page,
+//   page, last_page}} — 20 pedidos por página. Cada pedido traz: tracking
+//   (código Super Frete, ex. SLGE5HGESUGJJ), order_id (ULID, ex.
+//   01M81NESY1119DPEF8KBFWPXAJ), status, carrier, price, delivery {min,max
+//   em dias}, from/to {city, state, ...} e pudo. NÃO há campo "id" (é
+//   "order_id") e NÃO há o código da transportadora em lugar nenhum — a API
+//   da Super Frete não expõe o código próprio da transportadora. Por isso o
+//   site tem que sincronizar com o código Super Frete, nunca com o código
+//   da transportadora (ver o patch do front no relatório).
+//   GET /api/v0/order/{order_id} devolve 200 com o HTML do site da Super
+//   Frete, não JSON — o detalhe por pedido NÃO serve para enriquecer a
+//   resposta; origem/destino (cidade/UF) vêm do próprio item da lista.
 //
-// Aviso: o formato de resposta de GET /api/v0/me/orders não foi confirmado com
-// uma chamada real (a única tentativa ao vivo deu timeout na conexão lenta). O
-// código abaixo aceita os formatos mais prováveis (array direto ou dentro de
-// data/orders/results/items) e vários nomes de campo — se a Super Frete mudar o
-// formato, a função cai em "error" e o site mantém o status manual, sem quebrar.
+// A lista de envios fica em cache em memória por 30 min (melhor esforço em
+// serverless: vale quando a instância está quente) e TODAS as páginas são
+// buscadas em paralelo; o resultado "live" de cada código também fica em
+// cache por 30 min. Já o "not_found" fica em cache só por 3 min — um envio
+// criado agora aparece no rastreio logo, sem ficar "escondido" por meia hora.
 
 const SF_ORDERS_URL = "https://api.superfrete.com/api/v0/me/orders";
 const SF_ORDER_URL = "https://api.superfrete.com/api/v0/order/";
@@ -36,7 +45,12 @@ const USER_AGENT = "PVSR Logistica 1.0 (pedro.reis1@uscsonline.com.br)";
 // Orçamento total da função: o plano Hobby da Vercel limita a função a 10 s.
 const OVERALL_BUDGET_MS = 8000;
 const FETCH_TIMEOUT_MS = 4000;
-const MAX_PAGES = 3;
+// 1ª rodada busca as páginas 1..5 em paralelo (até 100 envios). Se o meta
+// disser que há mais páginas, uma 2ª rodada busca o resto, até 10 páginas
+// (200 envios) — acima disso a lista é considerada incompleta e um código
+// não achado devolve "error", nunca um "not_found" falso.
+const FIRST_ROUND_PAGES = 5;
+const MAX_TOTAL_PAGES = 10;
 
 // Cache em memória da lista de envios: válido por 30 minutos. Melhor esforço —
 // instâncias serverless frias não guardam o cache, mas quando a instância está
@@ -46,15 +60,17 @@ const MAX_PAGES = 3;
 const ORDERS_CACHE_TTL_MS = 30 * 60 * 1000;
 let ordersCache = { fetchedAt: 0, list: null };
 
-// Cache do resultado por código (live e not_found), válido por 30 min:
-// consulta repetida do mesmo código responde na hora, sem chamar a API de
-// novo — nem a lista, nem o detalhe. Erro e falta de token NÃO são cacheados.
+// Cache do resultado por código: "live" vale por 30 min; "not_found" vale
+// só por 3 min, para um envio criado agora ser achado logo. Erro e falta
+// de token NÃO são cacheados.
 const RESULT_CACHE_TTL_MS = 30 * 60 * 1000;
+const NOT_FOUND_CACHE_TTL_MS = 3 * 60 * 1000;
 const resultCache = new Map();
 
 function cacheResult(code, out) {
+  const ttl = out && out.state === "not_found" ? NOT_FOUND_CACHE_TTL_MS : RESULT_CACHE_TTL_MS;
   if (resultCache.size > 500) resultCache.clear();
-  resultCache.set(code, { fetchedAt: Date.now(), out });
+  resultCache.set(code, { fetchedAt: Date.now(), ttl, out });
 }
 
 function sendJson(res, httpStatus, obj) {
@@ -94,33 +110,79 @@ async function fetchWithRetry(url, headers, deadline) {
   throw lastError || new Error("fetch failed");
 }
 
-// Lista todos os envios da conta: usa o cache em memória quando válido e,
-// senão, busca as páginas em paralelo em vez de uma por vez (a API da Super
-// Frete é lenta por chamada; em paralelo o tempo total é o da página mais
-// lenta, não a soma). Só guarda no cache quando TODAS as páginas vieram —
-// lista parcial nunca é cacheada, para não "esconder" um envio por 30 min.
-// Retorna {list, complete}: complete=false quando alguma página falhou.
+// Última página da lista, lida do meta da 1ª página ({data, meta:{last_page}}).
+// Sem meta, assume as páginas da 1ª rodada (não afirma que a lista acabou).
+function lastPageOf(body) {
+  if (Array.isArray(body)) return FIRST_ROUND_PAGES;
+  if (!body || typeof body !== "object") return 1;
+  const meta = body.meta && typeof body.meta === "object" ? body.meta : null;
+  const v = (meta && (meta.last_page || meta.total_pages)) ||
+    body.last_page || body.total_pages || FIRST_ROUND_PAGES;
+  const n = parseInt(v, 10);
+  return isNaN(n) || n < 1 ? 1 : n;
+}
+
+// Lista TODOS os envios da conta: usa o cache em memória quando válido e,
+// senão, busca as páginas em paralelo (a API da Super Frete é lenta por
+// chamada; em paralelo o tempo total é o da página mais lenta, não a soma).
+// Só guarda no cache quando TODAS as páginas existentes vieram — lista
+// parcial nunca é cacheada, para não "esconder" um envio por 30 min.
+// Retorna {list, complete}: complete=false quando alguma página que deveria
+// existir falhou (ou quando há mais páginas que o teto) — nesse caso um
+// código não achado devolve "error", nunca "not_found".
 async function fetchOrdersList(headers, deadline) {
   const now = Date.now();
   if (ordersCache.list && now - ordersCache.fetchedAt < ORDERS_CACHE_TTL_MS) {
     return { list: ordersCache.list, complete: true };
   }
-  const results = await Promise.allSettled(
-    Array.from({ length: MAX_PAGES }, function (_, i) {
+  const all = [];
+  let complete = true;
+
+  // 1ª rodada: páginas 1..5 em paralelo.
+  const first = await Promise.allSettled(
+    Array.from({ length: FIRST_ROUND_PAGES }, function (_, i) {
       return fetchWithRetry(SF_ORDERS_URL + "?page=" + (i + 1), headers, deadline);
     })
   );
   // A 1ª página tem que vir: sem ela não há lista confiável.
-  if (results[0].status !== "fulfilled") throw new Error("orders fetch failed");
-  const all = [];
-  let complete = true;
-  for (const r of results) {
+  if (first[0].status !== "fulfilled") throw new Error("orders fetch failed");
+  const lastPage = lastPageOf(first[0].value);
+  for (let i = 0; i < first.length; i++) {
+    const pageNum = i + 1;
+    const r = first[i];
     if (r.status === "fulfilled") {
       for (const o of extractList(r.value)) all.push(o);
+    } else if (pageNum <= lastPage) {
+      // Falha numa página que deveria existir: lista incompleta.
+      complete = false;
+    }
+    // Falha numa página além da última: a API não tem essa página; ignora.
+  }
+
+  // 2ª rodada: se houver mais páginas que a 1ª rodada, busca o resto.
+  const totalPages = Math.min(lastPage, MAX_TOTAL_PAGES);
+  if (lastPage > FIRST_ROUND_PAGES) {
+    if (lastPage > MAX_TOTAL_PAGES) complete = false;
+    if (Date.now() < deadline - 500) {
+      const rest = await Promise.allSettled(
+        Array.from({ length: totalPages - FIRST_ROUND_PAGES }, function (_, i) {
+          return fetchWithRetry(
+            SF_ORDERS_URL + "?page=" + (FIRST_ROUND_PAGES + i + 1), headers, deadline);
+        })
+      );
+      for (let i = 0; i < rest.length; i++) {
+        const r = rest[i];
+        if (r.status === "fulfilled") {
+          for (const o of extractList(r.value)) all.push(o);
+        } else {
+          complete = false;
+        }
+      }
     } else {
       complete = false;
     }
   }
+
   if (complete) ordersCache = { fetchedAt: Date.now(), list: all };
   return { list: all, complete };
 }
@@ -132,7 +194,7 @@ function extractList(body) {
       if (Array.isArray(body[key])) return body[key];
     }
     // Um único pedido em vez de lista.
-    if (body.id || body.tracking || body.tracking_code) return [body];
+    if (body.id || body.order_id || body.tracking || body.tracking_code) return [body];
   }
   return [];
 }
@@ -146,14 +208,25 @@ function firstString(obj, keys) {
   return "";
 }
 
-function trackingOf(order) {
-  let t = firstString(order, ["tracking", "tracking_code", "trackingCode", "code"]);
-  if (t) return t;
+// Todos os códigos pelos quais um pedido pode ser achado, já normalizados:
+// o código Super Frete ("tracking") e o order_id — a API não expõe o código
+// próprio da transportadora, então ele não pode ser casado aqui.
+function codeCandidates(order) {
+  const out = [];
+  const push = function (v) {
+    if (typeof v === "string" && v.trim()) {
+      const n = normCode(v);
+      if (n && out.indexOf(n) === -1) out.push(n);
+    }
+  };
+  for (const k of ["tracking", "tracking_code", "trackingCode", "code", "order_id", "orderId"]) {
+    push(order[k]);
+  }
   const nested = order.tracking;
   if (nested && typeof nested === "object") {
-    return firstString(nested, ["code", "tracking_code", "trackingCode", "number"]);
+    for (const k of ["code", "tracking_code", "trackingCode", "number"]) push(nested[k]);
   }
-  return "";
+  return out;
 }
 
 function carrierOf(order) {
@@ -261,9 +334,9 @@ module.exports = async function handler(req, res) {
     return sendJson(res, 200, { state: "no_token" });
   }
 
-  // Resultado em cache (30 min): responde na hora, sem chamar a API.
+  // Resultado em cache: "live" vale 30 min, "not_found" só 3 min.
   const cachedResult = resultCache.get(code);
-  if (cachedResult && Date.now() - cachedResult.fetchedAt < RESULT_CACHE_TTL_MS) {
+  if (cachedResult && Date.now() - cachedResult.fetchedAt < cachedResult.ttl) {
     return sendJson(res, 200, cachedResult.out);
   }
 
@@ -274,12 +347,13 @@ module.exports = async function handler(req, res) {
   };
 
   try {
-    // 1) Lista os envios da conta (com cache + páginas em paralelo) e
-    // procura pelo código de rastreio.
+    // 1) Lista TODOS os envios da conta (com cache + páginas em paralelo)
+    // e procura pelo código de rastreio (ou pelo order_id).
     const { list, complete } = await fetchOrdersList(headers, deadline);
     let found = null;
     for (const order of list) {
-      if (order && typeof order === "object" && normCode(trackingOf(order)) === code) {
+      if (order && typeof order === "object" &&
+          codeCandidates(order).indexOf(code) !== -1) {
         found = order;
         break;
       }
@@ -300,22 +374,36 @@ module.exports = async function handler(req, res) {
     const carrier = carrierOf(found);
     if (carrier) out.carrier = carrier;
 
-    // 2) Detalhe do pedido (melhor esforço): origem, destino, previsão e
-    // última movimentação. Se falhar, o rastreio segue só com o status.
-    if (found.id && deadline - Date.now() > 2000) {
+    // Origem/destino (só cidade/UF) vêm do próprio item da lista — o
+    // detalhe por pedido não devolve JSON (ver o comentário no topo).
+    const origin = placeOf(found, ["from", "origin", "sender", "origin_address", "sender_address"]);
+    if (origin) out.origin = origin;
+    const destination = placeOf(found, ["to", "destination", "recipient", "destination_address", "recipient_address"]);
+    if (destination) out.destination = destination;
+
+    // 2) Detalhe do pedido (melhor esforço): previsão e última movimentação.
+    // Na prática o endpoint devolve o HTML do site da Super Frete, então
+    // quase sempre cai no catch e o rastreio segue só com o status — sem
+    // quebrar. O campo real é "order_id", não "id".
+    const detailId = found.order_id || found.id;
+    if (detailId && deadline - Date.now() > 2000) {
       try {
         const detail = await fetchWithRetry(
-          SF_ORDER_URL + encodeURIComponent(String(found.id)),
+          SF_ORDER_URL + encodeURIComponent(String(detailId)),
           headers,
           deadline
         );
         const d = (detail && typeof detail === "object" && !Array.isArray(detail))
           ? (detail.data && typeof detail.data === "object" ? detail.data : detail)
           : {};
-        const origin = placeOf(d, ["origin", "from", "sender", "origin_address", "sender_address"]);
-        if (origin) out.origin = origin;
-        const destination = placeOf(d, ["destination", "to", "recipient", "destination_address", "recipient_address"]);
-        if (destination) out.destination = destination;
+        if (!out.origin) {
+          const o2 = placeOf(d, ["origin", "from", "sender", "origin_address", "sender_address"]);
+          if (o2) out.origin = o2;
+        }
+        if (!out.destination) {
+          const d2 = placeOf(d, ["destination", "to", "recipient", "destination_address", "recipient_address"]);
+          if (d2) out.destination = d2;
+        }
         const eta = firstString(d, ["delivery_date", "estimated_delivery", "delivery_forecast", "eta", "deliveryDate"]);
         if (eta) out.eta = eta.slice(0, 10);
         const ev = lastEventOf(d) || lastEventOf(found);
