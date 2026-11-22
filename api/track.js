@@ -18,6 +18,11 @@
 //   {state:"error"}     — a Super Frete falhou, demorou demais ou o status dela
 //                         não tem correspondência nos 7 do site.
 //
+// A lista de envios fica em cache em memória por 30 min (melhor esforço em
+// serverless: vale quando a instância está quente) e as páginas são buscadas
+// em paralelo; o resultado de cada código também fica em cache por 30 min —
+// consultas repetidas respondem na hora, sem chamar a API de novo.
+//
 // Aviso: o formato de resposta de GET /api/v0/me/orders não foi confirmado com
 // uma chamada real (a única tentativa ao vivo deu timeout na conexão lenta). O
 // código abaixo aceita os formatos mais prováveis (array direto ou dentro de
@@ -32,6 +37,25 @@ const USER_AGENT = "PVSR Logistica 1.0 (pedro.reis1@uscsonline.com.br)";
 const OVERALL_BUDGET_MS = 8000;
 const FETCH_TIMEOUT_MS = 4000;
 const MAX_PAGES = 3;
+
+// Cache em memória da lista de envios: válido por 30 minutos. Melhor esforço —
+// instâncias serverless frias não guardam o cache, mas quando a instância está
+// quente as consultas repetidas respondem na hora, sem chamar a Super Frete.
+// O token NUNCA é guardado aqui: só a lista pública de envios (código, status,
+// transportadora), que já é o que a função devolve ao site.
+const ORDERS_CACHE_TTL_MS = 30 * 60 * 1000;
+let ordersCache = { fetchedAt: 0, list: null };
+
+// Cache do resultado por código (live e not_found), válido por 30 min:
+// consulta repetida do mesmo código responde na hora, sem chamar a API de
+// novo — nem a lista, nem o detalhe. Erro e falta de token NÃO são cacheados.
+const RESULT_CACHE_TTL_MS = 30 * 60 * 1000;
+const resultCache = new Map();
+
+function cacheResult(code, out) {
+  if (resultCache.size > 500) resultCache.clear();
+  resultCache.set(code, { fetchedAt: Date.now(), out });
+}
 
 function sendJson(res, httpStatus, obj) {
   res.writeHead(httpStatus, {
@@ -68,6 +92,37 @@ async function fetchWithRetry(url, headers, deadline) {
     }
   }
   throw lastError || new Error("fetch failed");
+}
+
+// Lista todos os envios da conta: usa o cache em memória quando válido e,
+// senão, busca as páginas em paralelo em vez de uma por vez (a API da Super
+// Frete é lenta por chamada; em paralelo o tempo total é o da página mais
+// lenta, não a soma). Só guarda no cache quando TODAS as páginas vieram —
+// lista parcial nunca é cacheada, para não "esconder" um envio por 30 min.
+// Retorna {list, complete}: complete=false quando alguma página falhou.
+async function fetchOrdersList(headers, deadline) {
+  const now = Date.now();
+  if (ordersCache.list && now - ordersCache.fetchedAt < ORDERS_CACHE_TTL_MS) {
+    return { list: ordersCache.list, complete: true };
+  }
+  const results = await Promise.allSettled(
+    Array.from({ length: MAX_PAGES }, function (_, i) {
+      return fetchWithRetry(SF_ORDERS_URL + "?page=" + (i + 1), headers, deadline);
+    })
+  );
+  // A 1ª página tem que vir: sem ela não há lista confiável.
+  if (results[0].status !== "fulfilled") throw new Error("orders fetch failed");
+  const all = [];
+  let complete = true;
+  for (const r of results) {
+    if (r.status === "fulfilled") {
+      for (const o of extractList(r.value)) all.push(o);
+    } else {
+      complete = false;
+    }
+  }
+  if (complete) ordersCache = { fetchedAt: Date.now(), list: all };
+  return { list: all, complete };
 }
 
 function extractList(body) {
@@ -206,6 +261,12 @@ module.exports = async function handler(req, res) {
     return sendJson(res, 200, { state: "no_token" });
   }
 
+  // Resultado em cache (30 min): responde na hora, sem chamar a API.
+  const cachedResult = resultCache.get(code);
+  if (cachedResult && Date.now() - cachedResult.fetchedAt < RESULT_CACHE_TTL_MS) {
+    return sendJson(res, 200, cachedResult.out);
+  }
+
   const headers = {
     Authorization: "Bearer " + token,
     "User-Agent": USER_AGENT,
@@ -213,30 +274,21 @@ module.exports = async function handler(req, res) {
   };
 
   try {
-    // 1) Lista os envios da conta e procura pelo código de rastreio.
+    // 1) Lista os envios da conta (com cache + páginas em paralelo) e
+    // procura pelo código de rastreio.
+    const { list, complete } = await fetchOrdersList(headers, deadline);
     let found = null;
-    for (let page = 1; page <= MAX_PAGES; page++) {
-      const body = await fetchWithRetry(SF_ORDERS_URL + "?page=" + page, headers, deadline);
-      const list = extractList(body);
-      for (const order of list) {
-        if (order && typeof order === "object" && normCode(trackingOf(order)) === code) {
-          found = order;
-          break;
-        }
+    for (const order of list) {
+      if (order && typeof order === "object" && normCode(trackingOf(order)) === code) {
+        found = order;
+        break;
       }
-      if (found) break;
-      if (!list.length) break;
-      // Última página indicada pela própria API.
-      if (body && typeof body === "object") {
-        const totalPages = body.total_pages || body.totalPages || body.last_page;
-        if (typeof totalPages === "number" && page >= totalPages) break;
-        if (body.next === null) break;
-      }
-      if (deadline - Date.now() < 1500) break;
     }
 
     if (!found) {
-      return sendJson(res, 200, { state: "not_found" });
+      // Lista incompleta (alguma página falhou): não afirmar "não encontrado".
+      if (complete) cacheResult(code, { state: "not_found" });
+      return sendJson(res, 200, { state: complete ? "not_found" : "error" });
     }
 
     const status = mapStatus(statusOf(found));
@@ -277,6 +329,7 @@ module.exports = async function handler(req, res) {
       if (ev) out.lastEvent = ev;
     }
 
+    cacheResult(code, out);
     return sendJson(res, 200, out);
   } catch (e) {
     return sendJson(res, 200, { state: "error" });
