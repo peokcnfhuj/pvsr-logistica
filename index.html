@@ -298,6 +298,7 @@
             </dl>
             <p id="resObs" style="margin-top:16px;color:var(--muted);display:none"></p>
             <p class="sync-note" id="resSync" style="display:none"></p>
+            <button class="btn btn-gold" id="resRefreshBtn" type="button" style="display:none;margin-top:14px">Atualizar agora</button>
             <div class="app-live" id="resAppLive">
               <p id="resAppText"></p>
               <div class="app-frame-wrap" id="resAppFrameWrap" style="display:none">
@@ -958,6 +959,13 @@
           $("resCodTransp").textContent=data.codTransp||"—";
           $("resPrevisao").textContent=fmtDate(data.previsao);
           $("resAtualizado").textContent=data.atualizado||"—";
+          /* Botão "Atualizar agora": guarda o cartão exibido e mostra o
+             botão quando há código da transportadora para conferir de novo
+             (ou pedido Lalamove, que também tem consulta ao vivo). */
+          lastTrack={data:data,status:status};
+          var refreshBtn=$("resRefreshBtn");
+          var hasCarrierCode=!!String(data.codSF||data.codTransp||"").trim();
+          refreshBtn.style.display=(hasCarrierCode||data.appCarrier==="lalamove")?"":"none";
           var obs=$("resObs");
           if(data.obs){ obs.textContent=data.obs; obs.style.display="block"; } else { obs.style.display="none"; }
           var syncEl=$("resSync");
@@ -1005,7 +1013,14 @@
            Adm e a data da última atualização já exibida acima. */
         function escHtml(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
         var syncBusy=false;
-        function syncFromCarrier(data,currentStatus){
+        /* Último cartão de rastreio exibido (dados + status), para o botão
+           "Atualizar agora" refazer a conferência sem recarregar a página. */
+        var lastTrack=null;
+        function setRefreshBtnIdle(){
+          var b=$("resRefreshBtn");
+          if(b){ b.disabled=false; b.textContent="Atualizar agora"; }
+        }
+        function syncFromCarrier(data,currentStatus,fresh){
           var code=(data.codSF||data.codTransp||"").trim();
           if(!code||syncBusy) return;
           syncBusy=true;
@@ -1019,6 +1034,7 @@
             el.textContent="Não foi possível conferir agora na Super Frete — vale o status acima, atualizado em ";
             var b=document.createElement("b"); b.textContent=data.atualizado||"—";
             el.appendChild(b); el.appendChild(document.createTextNode("."));
+            setRefreshBtnIdle();
           }
           function apply(live){
             clearTimeout(timer); syncBusy=false;
@@ -1041,14 +1057,15 @@
               msg+=".";
             }
             el2.innerHTML=msg;
+            setRefreshBtnIdle();
           }
           try{
-            fetch("/api/track?code="+encodeURIComponent(code),{method:"GET",headers:{"Accept":"application/json"},signal:ctrl?ctrl.signal:undefined})
+            fetch("/api/track?code="+encodeURIComponent(code)+(fresh?"&fresh=1":""),{method:"GET",headers:{"Accept":"application/json"},signal:ctrl?ctrl.signal:undefined})
               .then(function(r){ if(!r.ok) throw new Error("http"); return r.json(); })
               .then(function(j){
                 if(!j) { fail(); return; }
                 if(j.state==="live"){ apply(j); return; }
-                if(j.state==="no_token"){ clearTimeout(timer); syncBusy=false; el.style.display="none"; el.textContent=""; return; }
+                if(j.state==="no_token"){ clearTimeout(timer); syncBusy=false; el.style.display="none"; el.textContent=""; setRefreshBtnIdle(); return; }
                 fail();
               })
               .catch(fail);
@@ -1068,7 +1085,7 @@
           syncAppLink(data,1);
           if(scroll) $("trackResult").scrollIntoView({behavior:"smooth",block:"center"});
         }
-        function syncAppLink(data,currentStatus){
+        function syncAppLink(data,currentStatus,fresh){
           /* Uber e 99: só o link — as APIs deles são de conta empresa e o
              dono ainda não tem credencial. Lalamove: tenta a API oficial
              (função /api/track?lalamove=...) com o ID do pedido, se o Adm
@@ -1079,7 +1096,7 @@
           if(!orderId) return;
           var el=$("resSync"); el.style.display="block"; el.textContent="Conferindo o status na Lalamove…";
           var nowLabel=new Date().toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
-          fetch("/api/track?lalamove="+encodeURIComponent(orderId),{method:"GET",headers:{"Accept":"application/json"}})
+          fetch("/api/track?lalamove="+encodeURIComponent(orderId)+(fresh?"&fresh=1":""),{method:"GET",headers:{"Accept":"application/json"}})
             .then(function(r){ if(!r.ok) throw new Error("http"); return r.json(); })
             .then(function(j){
               if(!j||j.state!=="live") throw new Error("nolive");
@@ -1089,10 +1106,12 @@
               renderTracking(nd,true);
               var el2=$("resSync"); el2.style.display="block";
               el2.innerHTML="Status conferido na Lalamove em "+nowLabel+" — está atualizado.";
+              setRefreshBtnIdle();
             })
             .catch(function(){
               var el3=$("resSync"); el3.style.display="block";
               el3.textContent="O mapa ao vivo desta entrega está aqui mesmo nesta página. Se ele não carregar, toque em “Ver rastreio ao vivo”.";
+              setRefreshBtnIdle();
             });
         }
         function tryTrack(raw,scroll){
@@ -1133,6 +1152,25 @@
             .catch(function(){ $("trackResult").classList.remove("show"); $("trackError").classList.add("show"); el.style.display="none"; });
           return true;
         }
+        /* ---------- botão "Atualizar agora" no cartão do rastreio ----------
+           Refaz a conferência na fonte com fresh=1 (ignora o cache de 5 min
+           do servidor) e atualiza o cartão no lugar — status, linha do
+           tempo, campos e "Última atualização" — sem recarregar a página.
+           O status continua vindo da transportadora via Super Frete; nada
+           aqui promete "tempo real". */
+        function refreshTrackingNow(){
+          if(syncBusy) return;
+          var t=lastTrack; if(!t||!t.data) return;
+          var btn=$("resRefreshBtn");
+          if(btn){ btn.disabled=true; btn.textContent="Verificando…"; }
+          var d=t.data;
+          try{
+            if(String(d.codSF||d.codTransp||"").trim()){ syncFromCarrier(d,t.status,true); return; }
+            if(d.appCarrier==="lalamove"){ syncAppLink(d,t.status,true); return; }
+          }catch(e){ /* cai no restauro abaixo */ }
+          setRefreshBtnIdle();
+        }
+        $("resRefreshBtn").addEventListener("click",refreshTrackingNow);
         $("trackForm").addEventListener("submit",function(ev){
           ev.preventDefault();
           var ok=tryTrack($("trackInput").value,true);
