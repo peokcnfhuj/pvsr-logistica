@@ -505,8 +505,8 @@
 
               <div id="admUpdate" style="margin-top:26px;border-top:1px solid var(--line);padding-top:22px">
                 <h3 style="color:var(--gold-2);font-size:1.15rem;margin:0 0 8px">Atualizar pedido</h3>
-                <p class="adm-note" style="margin:0 0 16px">Cole só o código PVSR do envio para buscar o pedido e atualizar o status na mão — sem gerar um link novo do zero. O código PVSR do envio continua o mesmo; o link PVSR é gerado de novo com os dados atualizados, para mandar de novo ao cliente.</p>
-                <div class="field"><label for="uCode">Código PVSR do envio — ou o link PVSR completo</label><input type="text" id="uCode" placeholder="Ex.: PVSR-AB12CD — ou cole o link PVSR inteiro" /></div>
+                <p class="adm-note" style="margin:0 0 16px">Cole só o código do envio para buscar o pedido e atualizar o status na mão — sem gerar um link novo do zero. Vale o código PVSR, o código da transportadora (ex.: Super Frete) ou o link PVSR completo. A busca vale neste aparelho e no servidor, então qualquer código verdadeiro funciona, de qualquer aparelho. Se o pedido não estiver salvo, o site busca ao vivo na transportadora e abre para completar os dados. O código PVSR do envio continua o mesmo; o link PVSR é gerado de novo com os dados atualizados, para mandar de novo ao cliente.</p>
+                <div class="field"><label for="uCode">Código do envio — PVSR, da transportadora ou o link PVSR completo</label><input type="text" id="uCode" placeholder="Ex.: PVSR-AB12CD ou SLGE5HGESUGJJ — ou cole o link PVSR inteiro" /></div>
                 <button class="btn btn-gold" type="button" id="updSearchBtn">Buscar pedido</button>
                 <p class="ok-msg" id="updOk"></p>
                 <p class="form-error" id="updErr"></p>
@@ -608,12 +608,105 @@
         function saveShipment(data){
           if(!data||!data.ref) return;
           var map=loadShipments(); map[data.ref]=data; saveShipments(map);
+          pushShipmentToServer(data);
+        }
+        /* ---------- pedidos no servidor (Vercel KV) ----------
+           Além de guardar neste aparelho, a geração envia o pedido ao
+           servidor, indexado pelo código PVSR — é o que faz qualquer
+           código verdadeiro funcionar na busca, de qualquer aparelho,
+           mesmo que o pedido tenha sido gerado antes ou em outro lugar.
+           O envio é "dispara e esquece": se o servidor falhar, estiver
+           sem o banco configurado ou sem internet, a geração continua
+           normal e nada quebra. Sem as variáveis do KV na Vercel, a rota
+           responde "not_configured" e o site segue só com o localStorage. */
+        function pushShipmentToServer(data){
+          try{
+            if(typeof fetch!=="function") return;
+            fetch("/api/orders",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({data:data}),keepalive:true}).catch(function(){});
+          }catch(e){}
+        }
+        function fetchServerOrder(code){
+          /* O servidor resolve os dois: código PVSR e código da
+             transportadora (pelo índice codSF -> ref). O traço do código
+             PVSR NÃO pode ser tirado aqui: a chave no servidor é
+             "PVSR-XXXXXX", com traço. */
+          var c=String(code||"").trim().toUpperCase();
+          if(!/^[A-Z0-9-]{4,32}$/.test(c)) return Promise.resolve(null);
+          var ctrl=null, timer=null;
+          try{
+            if(typeof AbortController!=="undefined"){ ctrl=new AbortController(); timer=setTimeout(function(){ try{ctrl.abort();}catch(e){} },8000); }
+          }catch(e){ ctrl=null; }
+          var opts={};
+          if(ctrl) opts.signal=ctrl.signal;
+          return fetch("/api/orders?code="+encodeURIComponent(c),opts).then(function(res){
+            if(timer) clearTimeout(timer);
+            if(!res||!res.ok) return null;
+            return res.json();
+          }).then(function(j){
+            if(j&&j.ok&&j.found&&j.data&&j.data.ref) return j.data;
+            return null;
+          }).catch(function(){ if(timer) clearTimeout(timer); return null; });
+        }
+        /* ---------- código da transportadora não salvo: ao vivo ----------
+           Se o código colado for da transportadora (ex.: Super Frete/Loggi)
+           e o pedido não estiver salvo em lugar nenhum, consulta a Super
+           Frete pela rota /api/track que já existe e abre o formulário com
+           os dados que vieram de lá (status, transportadora, origem,
+           destino). O que não vier da transportadora, o Adm preenche — e ao
+           salvar o pedido ganha um código PVSR novo. */
+        function carrierDisplayName(c){
+          var s=String(c||"").trim();
+          if(!s) return "";
+          return s.charAt(0).toUpperCase()+s.slice(1);
+        }
+        function fetchLiveCarrierOrder(code){
+          var c=String(code||"").replace(/[\s-]/g,"").toUpperCase();
+          if(!/^[A-Z0-9]{6,64}$/.test(c)) return Promise.resolve(null);
+          var ctrl=null, timer=null;
+          try{
+            if(typeof AbortController!=="undefined"){ ctrl=new AbortController(); timer=setTimeout(function(){ try{ctrl.abort();}catch(e){} },10000); }
+          }catch(e){ ctrl=null; }
+          var opts={headers:{"Accept":"application/json"}};
+          if(ctrl) opts.signal=ctrl.signal;
+          return fetch("/api/track?code="+encodeURIComponent(c),opts).then(function(res){
+            if(timer) clearTimeout(timer);
+            if(!res||!res.ok) return null;
+            return res.json();
+          }).then(function(j){
+            if(!j||j.state!=="live") return null;
+            var st=parseInt(j.status,10); if(isNaN(st)||st<0||st>6) st=2;
+            return {
+              v:2, ref:newRef(), cliente:"", produto:"", origem:j.origin||"", destino:j.destination||"",
+              transportadora:carrierDisplayName(j.carrier||""), codTransp:"", codSF:c, linkTransp:"",
+              appLink:"", appCarrier:"", appOrderId:"", s:st, previsao:j.eta||"", obs:"", atualizado:todayBR()
+            };
+          }).catch(function(){ if(timer) clearTimeout(timer); return null; });
         }
         function findShipmentByCode(code){
           var c=String(code||"").trim().toUpperCase();
           if(!c) return null;
           var map=loadShipments();
           return Object.prototype.hasOwnProperty.call(map,c)?map[c]:null;
+        }
+        function normCarrierCode(code){ return String(code||"").replace(/[\s-]/g,"").toUpperCase(); }
+        /* Busca o pedido salvo pelo código da transportadora: primeiro
+           pelo código Super Frete (codSF), depois pelo código próprio da
+           transportadora (codTransp). */
+        function findShipmentByCarrierCode(code){
+          var c=normCarrierCode(code);
+          if(!c) return null;
+          var map=loadShipments();
+          var keys=Object.keys(map);
+          var i, d;
+          for(i=0;i<keys.length;i++){
+            d=map[keys[i]];
+            if(d&&normCarrierCode(d.codSF)===c) return d;
+          }
+          for(i=0;i<keys.length;i++){
+            d=map[keys[i]];
+            if(d&&normCarrierCode(d.codTransp)===c) return d;
+          }
+          return null;
         }
 
         /* ---------- visibilidade da Área do Adm ----------
@@ -1151,31 +1244,59 @@
           $("uPrevisao").value=d.previsao||"";
           $("uObs").value=d.obs||"";
         }
-        function updFind(raw){
+        async function updFind(raw){
           var token=extractToken(raw);
           if(!token) return null;
+          /* 1) salvo neste aparelho pelo código PVSR */
           var saved=findShipmentByCode(token);
           if(saved) return {data:saved,fromLink:false};
+          /* 2) salvo neste aparelho pelo código da transportadora */
+          var byCarrier=findShipmentByCarrierCode(token);
+          if(byCarrier) return {data:byCarrier,fromLink:false};
+          /* 3) servidor: aceita código PVSR e código da transportadora */
+          var srv=null;
+          try{ srv=await fetchServerOrder(token); }catch(e){ srv=null; }
+          if(srv){ saveShipment(srv); return {data:srv,fromLink:false}; }
+          /* 4) link PVSR completo colado: decodifica (e prefere a cópia
+             do servidor, se houver — é o status mais recente). */
           try{
             var d=decodeData(token);
-            if(d&&typeof d==="object"&&("cliente" in d)&&d.ref) return {data:d,fromLink:true};
+            if(d&&typeof d==="object"&&("cliente" in d)&&d.ref){
+              var fresh=null;
+              try{ fresh=await fetchServerOrder(d.ref); }catch(e){ fresh=null; }
+              if(fresh){ saveShipment(fresh); return {data:fresh,fromLink:true}; }
+              return {data:d,fromLink:true};
+            }
           }catch(e){ /* não é um link PVSR válido */ }
+          /* 5) código da transportadora sem registro: buscar ao vivo na
+             Super Frete e abrir para completar os dados. */
+          if(!/^PVSR-[A-Z0-9]{4,12}$/i.test(token)){
+            var live=null;
+            try{ live=await fetchLiveCarrierOrder(token); }catch(e){ live=null; }
+            if(live) return {data:live,fromLink:false,fromCarrier:true};
+          }
           return null;
         }
-        $("updSearchBtn").addEventListener("click",function(){
+        $("updSearchBtn").addEventListener("click",async function(){
           if(!currentUser() || currentUser().role!=="admin") return;
-          showMsg("updOk",""); showMsg("updErr","");
-          var found=updFind($("uCode").value);
-          if(!found){
-            updCurrentRef="";
-            $("updForm").style.display="none";
-            showMsg("updErr","Pedido não encontrado neste aparelho — gere o link novamente ou cole o link PVSR completo.");
-            return;
+          var btn=this; btn.disabled=true;
+          showMsg("updOk","Buscando pedido…"); showMsg("updErr","");
+          try{
+            var found=await updFind($("uCode").value);
+            if(!found){
+              updCurrentRef="";
+              $("updForm").style.display="none";
+              showMsg("updOk","");
+              showMsg("updErr","Pedido não encontrado — confira o código ou cole o link PVSR completo.");
+              return;
+            }
+            updCurrentRef=found.data.ref;
+            updFillForm(found.data);
+            $("updForm").style.display="block";
+            showMsg("updOk",found.fromCarrier?"Pedido encontrado na Super Frete. Complete os dados que faltam e salve — o pedido vai ganhar um código PVSR novo.":found.fromLink?"Pedido encontrado no link colado. Confira os dados e atualize o que precisar.":"Pedido encontrado. Confira os dados e atualize o que precisar.");
+          }finally{
+            btn.disabled=false;
           }
-          updCurrentRef=found.data.ref;
-          updFillForm(found.data);
-          $("updForm").style.display="block";
-          showMsg("updOk",found.fromLink?"Pedido encontrado no link colado. Confira os dados e atualize o que precisar.":"Pedido encontrado. Confira os dados e atualize o que precisar.");
         });
         $("updForm").addEventListener("submit",function(ev){
           ev.preventDefault();
