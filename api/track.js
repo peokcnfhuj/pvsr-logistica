@@ -44,6 +44,28 @@
 // caches — a fonte continua sendo a Super Frete, que repassa a
 // movimentação da transportadora com atraso; nada aqui é "tempo real".
 //
+// RASTREIO DETALHADO — FONTE PRIMÁRIA DO STATUS (23/11/2026):
+//   A API de lista só devolve o status grosso ("posted") e NÃO tem campo
+//   de eventos. Os eventos da transportadora — o que o site/rastreio da
+//   Super Frete mostra — vivem no Firestore público do app dela:
+//   projeto "freight-calculator-8d6c1", coleção "tracking", documento por
+//   código (campo "code", em maiúsculas), com o array "tracks" (cada
+//   evento: status, description, trackedAt, location) e o campo "status"
+//   (status atual). A leitura é PÚBLICA via REST (runQuery), SEM nenhuma
+//   credencial — confirmado ao vivo em 23/11/2026: a consulta sem chave
+//   devolveu o documento de SLGE5HGESUGJJ com os eventos Emitido (22/11
+//   13:08Z), Postado (22/11 15:04Z) e Coletado (23/11 15:28Z), ou seja,
+//   "Coletado" enquanto a API de lista ainda dizia "posted". Por isso o
+//   status do site agora vem do detalhado (mapeado para os 7 do site) e
+//   só cai no status da lista quando o detalhado falha, não acha o
+//   documento ou não casa com o pedido (orderId conferido com o da lista).
+//   Nenhuma chave é embutida: projeto/coleção são públicos (estão no JS
+//   do próprio site da Super Frete) e a leitura não usa auth. O cache de
+//   5 min e o fresh=1 valem para o resultado inteiro, detalhado incluso.
+//   Ressalva honesta: o documento só muda quando a Super Frete consulta
+//   a transportadora de novo (campo "lastSearch") — o site mostra o
+//   último evento QUE A SUPER FRETE JÁ REGISTROU, igual ao site dela.
+//
 // ENTREGAS POR APLICATIVO (Uber / 99 / Lalamove):
 //   Nenhum dos três tem rastreio público por código: o destinatário
 //   acompanha por um LINK ao vivo por entrega. O site aceita esse link
@@ -73,6 +95,12 @@ const crypto = require("crypto");
 
 const SF_ORDERS_URL = "https://api.superfrete.com/api/v0/me/orders";
 const SF_ORDER_URL = "https://api.superfrete.com/api/v0/order/";
+// Firestore público da Super Frete (ver o comentário no topo): projeto e
+// coleção do rastreio detalhado. Leitura pública via REST, sem credencial.
+const SF_FIRESTORE_PROJECT = "freight-calculator-8d6c1";
+const SF_FIRESTORE_RUNQUERY_URL =
+  "https://firestore.googleapis.com/v1/projects/" + SF_FIRESTORE_PROJECT +
+  "/databases/(default)/documents:runQuery";
 const LALA_BASE = "https://rest.lalamove.com";
 const UBER_AUTH_URL = "https://auth.uber.com/oauth/v2/token";
 const UBER_API_BASE = "https://api.uber.com";
@@ -512,17 +540,107 @@ function statusOf(order) {
   return "";
 }
 
+// Desembrulha um valor do Firestore REST (stringValue, timestampValue,
+// booleanValue, integerValue/doubleValue, nullValue, mapValue, arrayValue)
+// para o valor JS correspondente.
+function fsUnwrap(v) {
+  if (!v || typeof v !== "object") return v;
+  if (typeof v.stringValue === "string") return v.stringValue;
+  if (typeof v.timestampValue === "string") return v.timestampValue;
+  if (typeof v.booleanValue === "boolean") return v.booleanValue;
+  if (typeof v.integerValue === "string") return parseInt(v.integerValue, 10);
+  if (typeof v.doubleValue === "number") return v.doubleValue;
+  if ("nullValue" in v) return null;
+  if (v.mapValue && v.mapValue.fields && typeof v.mapValue.fields === "object") {
+    const out = {};
+    for (const k of Object.keys(v.mapValue.fields)) out[k] = fsUnwrap(v.mapValue.fields[k]);
+    return out;
+  }
+  if (v.arrayValue && Array.isArray(v.arrayValue.values)) {
+    return v.arrayValue.values.map(fsUnwrap);
+  }
+  return null;
+}
+
+// Busca o rastreio detalhado no Firestore público da Super Frete pelo
+// código (campo "code", em maiúsculas). Devolve null quando não há
+// documento ou a consulta falha — o chamador usa o status da lista.
+// Retorno: {status (0..6 ou -1), lastEvent {label, date, city}?, orderId,
+// isDelivered}. O "status" vem do último evento de "tracks" (ordem
+// cronológica, o mais recente é o último) ou, sem eventos, do campo
+// "status" do documento. Nunca joga erro: qualquer falha devolve null.
+async function fetchDetailedTracking(code, deadline) {
+  const body = JSON.stringify({
+    structuredQuery: {
+      from: [{ collectionId: "tracking" }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "code" },
+          op: "EQUAL",
+          value: { stringValue: code },
+        },
+      },
+      limit: 1,
+    },
+  });
+  const timeoutMs = Math.max(500, Math.min(3000, deadline - Date.now()));
+  try {
+    const r = await fetchJsonOnce(SF_FIRESTORE_RUNQUERY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: body,
+    }, timeoutMs);
+    if (!r.ok || !Array.isArray(r.body)) return null;
+    let fields = null;
+    for (const row of r.body) {
+      if (row && row.document && row.document.fields) { fields = row.document.fields; break; }
+    }
+    if (!fields) return null;
+    const doc = {};
+    for (const k of Object.keys(fields)) doc[k] = fsUnwrap(fields[k]);
+    const events = Array.isArray(doc.tracks) ? doc.tracks : [];
+    const last = events.length ? events[events.length - 1] : null;
+    const rawStatus = (last && last.status) || doc.status || "";
+    const out = {
+      status: mapStatus(rawStatus),
+      orderId: typeof doc.orderId === "string" ? doc.orderId : "",
+      isDelivered: doc.isDelivered === true,
+    };
+    if (out.isDelivered) out.status = 6;
+    if (last) {
+      const label = String(last.description || last.status || "").slice(0, 140);
+      if (label) {
+        const ev = { label: label };
+        const when = last.trackedAt || last.date || "";
+        if (when) ev.date = String(when).slice(0, 10);
+        const loc = last.location && typeof last.location === "object" ? last.location : null;
+        if (loc) {
+          const city = String(loc.city || "") +
+            (loc.uf ? "/" + String(loc.uf).toUpperCase() : "");
+          if (city && city !== "/") ev.city = city;
+        }
+        out.lastEvent = ev;
+      }
+    }
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Mapeia o status da Super Frete para os 7 status do site (-1 = sem correspondência).
 function mapStatus(raw) {
   const s = String(raw || "").toLowerCase().trim().replace(/_/g, " ");
   if (!s) return -1;
   if (s.indexOf("deliver") === 0 || s === "entregue") return 6;
   if (s.indexOf("out for") === 0 || s.indexOf("saiu") === 0) return 5;
-  if (s.indexOf("transit") > -1 || s.indexOf("trânsito") > -1 || s.indexOf("transito") > -1) return 4;
+  if (s.indexOf("transit") > -1 || s.indexOf("trânsito") > -1 || s.indexOf("transito") > -1 ||
+      s.indexOf("em rota") > -1) return 4;
   if (s.indexOf("collect") === 0 || s.indexOf("colet") === 0) return 3;
   if (s.indexOf("post") === 0) return 2;
   if (s.indexOf("released") === 0 || s.indexOf("generated") === 0 || s.indexOf("liberad") === 0 ||
-      s.indexOf("aguardando") === 0 || s.indexOf("waiting") === 0) return 1;
+      s.indexOf("aguardando") === 0 || s.indexOf("waiting") === 0 ||
+      s.indexOf("emit") === 0) return 1;
   if (s.indexOf("created") === 0 || s.indexOf("pending") === 0 || s.indexOf("pendente") === 0 ||
       s.indexOf("prepar") === 0) return 0;
   return -1;
@@ -646,6 +764,11 @@ module.exports = async function handler(req, res) {
   };
 
   try {
+    // Rastreio detalhado em paralelo com a lista (só precisa do código):
+    // é a fonte primária do status — o que o site da Super Frete mostra.
+    // Nunca joga erro; se falhar, o status vem da lista (abaixo).
+    const detailedPromise = fetchDetailedTracking(code, deadline);
+
     // 1) Lista TODOS os envios da conta (com cache + páginas em paralelo)
     // e procura pelo código de rastreio (ou pelo order_id). Com fresh=1,
     // a lista também é buscada de novo, não só o resultado por código.
@@ -665,12 +788,24 @@ module.exports = async function handler(req, res) {
       return sendJson(res, 200, { state: complete ? "not_found" : "error" });
     }
 
-    const status = mapStatus(statusOf(found));
+    // Status: primeiro o detalhado (eventos da transportadora); só vale
+    // quando o documento é do mesmo pedido (orderId confere com o da
+    // lista) — senão, ignora e usa o status da lista.
+    const detailed = await detailedPromise;
+    let status = -1;
+    if (detailed && detailed.status >= 0) {
+      const listOrderId = String(found.order_id || found.id || "");
+      if (!detailed.orderId || !listOrderId || detailed.orderId === listOrderId) {
+        status = detailed.status;
+      }
+    }
+    if (status < 0) status = mapStatus(statusOf(found));
     if (status < 0) {
       return sendJson(res, 200, { state: "error" });
     }
 
     const out = { state: "live", status };
+    if (detailed && detailed.lastEvent) out.lastEvent = detailed.lastEvent;
     const carrier = carrierOf(found);
     if (carrier) out.carrier = carrier;
 
