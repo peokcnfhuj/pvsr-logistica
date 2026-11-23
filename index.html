@@ -502,6 +502,37 @@
                 </div>
               </div>
               <p class="adm-note" style="margin-top:16px">Passo a passo: 1) emita o frete na transportadora e copie o link dela · 2) cole o link no formulário e preencha os dados · 3) gere e mande o link PVSR ao cliente · 4) o cliente abre o link e o site já mostra o status mais recente da Super Frete, conferido pelo servidor — sem você fazer nada. Para entregas por aplicativo, cole o link do aplicativo no campo próprio: o cliente acompanha o mapa ao vivo pelo botão no cartão de rastreio.</p>
+
+              <div id="admUpdate" style="margin-top:26px;border-top:1px solid var(--line);padding-top:22px">
+                <h3 style="color:var(--gold-2);font-size:1.15rem;margin:0 0 8px">Atualizar pedido</h3>
+                <p class="adm-note" style="margin:0 0 16px">Cole só o código PVSR do envio para buscar o pedido e atualizar o status na mão — sem gerar um link novo do zero. O código PVSR do envio continua o mesmo; o link PVSR é gerado de novo com os dados atualizados, para mandar de novo ao cliente.</p>
+                <div class="field"><label for="uCode">Código PVSR do envio — ou o link PVSR completo</label><input type="text" id="uCode" placeholder="Ex.: PVSR-AB12CD — ou cole o link PVSR inteiro" /></div>
+                <button class="btn btn-gold" type="button" id="updSearchBtn">Buscar pedido</button>
+                <p class="ok-msg" id="updOk"></p>
+                <p class="form-error" id="updErr"></p>
+                <form id="updForm" style="display:none;margin-top:18px">
+                  <div class="field"><label for="uCliente">Nome do cliente (destinatário)</label><input type="text" id="uCliente" required /></div>
+                  <div class="field"><label for="uProduto">Produto enviado</label><input type="text" id="uProduto" required /></div>
+                  <div class="two">
+                    <div class="field"><label for="uOrigem">Origem</label><input type="text" id="uOrigem" required /></div>
+                    <div class="field"><label for="uDestino">Destino</label><input type="text" id="uDestino" required /></div>
+                  </div>
+                  <div class="two">
+                    <div class="field"><label for="uTransportadora">Transportadora</label><input type="text" id="uTransportadora" required /></div>
+                    <div class="field"><label for="uCodTransp">Código na transportadora</label><input type="text" id="uCodTransp" /></div>
+                    <div class="field"><label for="uCodSF">Código Super Frete</label><input type="text" id="uCodSF" placeholder="Ex.: SLGE5HGESUGJJ — o código do envio na Super Frete" /></div>
+                  </div>
+                  <div class="field"><label for="uLinkTransp">Link de rastreio da transportadora</label><input type="url" id="uLinkTransp" placeholder="Cole aqui o link que a transportadora gerou" /></div>
+                  <div class="field"><label for="uAppLink">Link de rastreio do aplicativo (Uber / 99 / Lalamove)</label><input type="url" id="uAppLink" placeholder="Cole o link que o aplicativo gerou para esta entrega" /></div>
+                  <div class="field"><label for="uAppOrderId">ID do pedido no aplicativo (opcional)</label><input type="text" id="uAppOrderId" placeholder="Só Lalamove: o ID numérico do pedido" /></div>
+                  <div class="two">
+                    <div class="field"><label for="uStatus">Status atual do envio</label><select id="uStatus"><option value="0">Objeto em preparo</option><option value="1">Esperando a transportadora</option><option value="2">Objeto postado</option><option value="3">Coletado pela transportadora</option><option value="4">Em trânsito</option><option value="5">Saiu para entrega</option><option value="6">Entregue</option></select></div>
+                    <div class="field"><label for="uPrevisao">Previsão de entrega</label><input type="date" id="uPrevisao" /></div>
+                  </div>
+                  <div class="field"><label for="uObs">Observação para o cliente (opcional)</label><textarea id="uObs" placeholder="Ex.: Entrega em horário comercial. Tenha um documento com foto em mãos."></textarea></div>
+                  <button class="btn btn-gold btn-block" type="submit">Atualizar pedido</button>
+                </form>
+              </div>
             </div>
           </div>
         </div>
@@ -526,6 +557,7 @@
         var ADMIN_EMAIL = "pedro.reis1@uscsonline.com.br";
         var ACCOUNTS_KEY = "pvsr_logistica_accounts_v2";
         var SESSION_KEY = "pvsr_logistica_session_v2";
+        var SHIPMENTS_KEY = "pvsr_logistica_shipments_v1";
         var STEPS = ["Objeto em preparo", "Esperando a transportadora", "Objeto postado", "Coletado", "Em trânsito", "Saiu para entrega", "Entregue"];
         var STEP_SHORT = ["Em preparo", "Esperando transp.", "Objeto postado", "Coletado", "Em trânsito", "Saiu p/ entrega", "Entregue"];
         var CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
@@ -559,6 +591,29 @@
           delete memStore[key];
           if(LS){ try{ LS.removeItem(key); }catch(e){} }
           if(SS){ try{ SS.removeItem(key); }catch(e){} }
+        }
+
+        /* ---------- pedidos gerados, guardados neste aparelho ----------
+           Cada pedido gerado é salvo aqui, com o código PVSR (ref) como
+           chave — é o que permite atualizar o pedido depois só com o
+           código, sem gerar um link novo do zero. O link PVSR continua
+           sendo a fonte do rastreio para o cliente; o que fica guardado
+           aqui é só a cópia do Adm, neste aparelho. */
+        function loadShipments(){
+          var map={};
+          try{ map=JSON.parse(storeGet(SHIPMENTS_KEY)||"{}"); if(!map||typeof map!=="object"||Array.isArray(map)) map={}; }catch(e){ map={}; }
+          return map;
+        }
+        function saveShipments(map){ storeSet(SHIPMENTS_KEY,JSON.stringify(map)); }
+        function saveShipment(data){
+          if(!data||!data.ref) return;
+          var map=loadShipments(); map[data.ref]=data; saveShipments(map);
+        }
+        function findShipmentByCode(code){
+          var c=String(code||"").trim().toUpperCase();
+          if(!c) return null;
+          var map=loadShipments();
+          return Object.prototype.hasOwnProperty.call(map,c)?map[c]:null;
         }
 
         /* ---------- visibilidade da Área do Adm ----------
@@ -1031,6 +1086,7 @@
             atualizado:todayBR()
           };
           if(data.appLink) data.appCarrier=detectAppCarrier(data.appLink);
+          saveShipment(data);
           var token=encodeData(data);
           lastCode=token;
           lastLink=pageBaseUrl()+"?r="+token;
@@ -1064,6 +1120,103 @@
         $("copyMsgBtn").addEventListener("click",function(){copyText(lastMsg,this);});
         $("previewBtn").addEventListener("click",function(){
           if(window.__pvsrPreview){ renderTracking(window.__pvsrPreview); $("rastreio").scrollIntoView({behavior:"smooth",block:"start"}); }
+        });
+
+        /* ---------- Adm: atualizar pedido só com o código ----------
+           Busca o pedido guardado neste aparelho pelo código PVSR (ou
+           decodifica o link PVSR completo colado) e abre o formulário já
+           preenchido. Ao atualizar, o código PVSR do envio continua o
+           mesmo e o link PVSR é gerado de novo com os dados atualizados,
+           na mesma área de saída do gerador — é só copiar e mandar de
+           novo ao cliente. O status manual continua sendo o que vale
+           quando não há sincronização ao vivo da Super Frete. */
+        var updCurrentRef="";
+        function updEffStatus(d){
+          var rawS=parseInt(d.s,10); if(isNaN(rawS)) rawS=0;
+          var st=(d.v&&parseInt(d.v,10)>=2)?rawS:rawS+2;
+          return Math.max(0,Math.min(STEPS.length-1,st));
+        }
+        function updFillForm(d){
+          $("uCliente").value=d.cliente||"";
+          $("uProduto").value=d.produto||"";
+          $("uOrigem").value=d.origem||"";
+          $("uDestino").value=d.destino||"";
+          $("uTransportadora").value=d.transportadora||"";
+          $("uCodTransp").value=d.codTransp||"";
+          $("uCodSF").value=d.codSF||"";
+          $("uLinkTransp").value=d.linkTransp||"";
+          $("uAppLink").value=d.appLink||"";
+          $("uAppOrderId").value=d.appOrderId||"";
+          $("uStatus").value=String(updEffStatus(d));
+          $("uPrevisao").value=d.previsao||"";
+          $("uObs").value=d.obs||"";
+        }
+        function updFind(raw){
+          var token=extractToken(raw);
+          if(!token) return null;
+          var saved=findShipmentByCode(token);
+          if(saved) return {data:saved,fromLink:false};
+          try{
+            var d=decodeData(token);
+            if(d&&typeof d==="object"&&("cliente" in d)&&d.ref) return {data:d,fromLink:true};
+          }catch(e){ /* não é um link PVSR válido */ }
+          return null;
+        }
+        $("updSearchBtn").addEventListener("click",function(){
+          if(!currentUser() || currentUser().role!=="admin") return;
+          showMsg("updOk",""); showMsg("updErr","");
+          var found=updFind($("uCode").value);
+          if(!found){
+            updCurrentRef="";
+            $("updForm").style.display="none";
+            showMsg("updErr","Pedido não encontrado neste aparelho — gere o link novamente ou cole o link PVSR completo.");
+            return;
+          }
+          updCurrentRef=found.data.ref;
+          updFillForm(found.data);
+          $("updForm").style.display="block";
+          showMsg("updOk",found.fromLink?"Pedido encontrado no link colado. Confira os dados e atualize o que precisar.":"Pedido encontrado. Confira os dados e atualize o que precisar.");
+        });
+        $("updForm").addEventListener("submit",function(ev){
+          ev.preventDefault();
+          if(!currentUser() || currentUser().role!=="admin") return;
+          if(!updCurrentRef) return;
+          var data={
+            v:2,
+            ref:updCurrentRef,
+            cliente:$("uCliente").value.trim(),
+            produto:$("uProduto").value.trim(),
+            origem:$("uOrigem").value.trim(),
+            destino:$("uDestino").value.trim(),
+            transportadora:$("uTransportadora").value.trim(),
+            codTransp:$("uCodTransp").value.trim(),
+            codSF:$("uCodSF").value.trim(),
+            linkTransp:$("uLinkTransp").value.trim(),
+            appLink:(function(){var l=$("uAppLink").value.trim();return /^https?:\/\//i.test(l)?l:"";})(),
+            appCarrier:"",
+            appOrderId:$("uAppOrderId").value.trim(),
+            s:parseInt($("uStatus").value,10),
+            previsao:$("uPrevisao").value,
+            obs:$("uObs").value.trim(),
+            atualizado:todayBR()
+          };
+          if(data.appLink) data.appCarrier=detectAppCarrier(data.appLink);
+          saveShipment(data);
+          var token=encodeData(data);
+          lastCode=token;
+          lastLink=pageBaseUrl()+"?r="+token;
+          lastMsg="Olá, "+data.cliente+"! Seu pedido ("+data.produto+") foi enviado pela PVSR Logística e já está a caminho. Para acompanhar sua entrega, é só tocar neste link — ele abre direto no rastreio, sem precisar colar código nenhum: "+lastLink+" · Código do envio: "+data.ref;
+          $("outRef").textContent=data.ref;
+          $("outLink").textContent=lastLink;
+          $("outLink").href=lastLink;
+          $("outCode").textContent=lastCode;
+          $("outMsg").textContent=lastMsg;
+          $("outEmpty").style.display="none";
+          $("outFilled").style.display="block";
+          $("copyOk").classList.remove("show");
+          window.__pvsrPreview=data;
+          showMsg("updOk","Pedido atualizado. O link PVSR novo está na área de saída, acima — copie e mande de novo ao cliente.");
+          $("shipOutput").scrollIntoView({behavior:"smooth",block:"center"});
         });
 
         /* ---------- token da Super Frete ----------
