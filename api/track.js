@@ -32,11 +32,17 @@
 //   Frete, não JSON — o detalhe por pedido NÃO serve para enriquecer a
 //   resposta; origem/destino (cidade/UF) vêm do próprio item da lista.
 //
-// A lista de envios fica em cache em memória por 30 min (melhor esforço em
+// A lista de envios fica em cache em memória por 5 min (melhor esforço em
 // serverless: vale quando a instância está quente) e TODAS as páginas são
 // buscadas em paralelo; o resultado "live" de cada código também fica em
-// cache por 30 min. Já o "not_found" fica em cache só por 3 min — um envio
-// criado agora aparece no rastreio logo, sem ficar "escondido" por meia hora.
+// cache por 5 min. Já o "not_found" fica em cache só por 3 min — um envio
+// criado agora aparece no rastreio logo, sem ficar "escondido" por minutos.
+// A lista e o resultado têm o mesmo prazo: se a lista ficasse mais tempo
+// em cache, o resultado "live" de 5 min releria uma lista velha e o prazo
+// de 5 min não valeria nada. O botão "Atualizar agora" do site passa
+// fresh=1 e força uma consulta nova à Super Frete, regravando os dois
+// caches — a fonte continua sendo a Super Frete, que repassa a
+// movimentação da transportadora com atraso; nada aqui é "tempo real".
 //
 // ENTREGAS POR APLICATIVO (Uber / 99 / Lalamove):
 //   Nenhum dos três tem rastreio público por código: o destinatário
@@ -84,18 +90,20 @@ const FETCH_TIMEOUT_MS = 4000;
 const FIRST_ROUND_PAGES = 5;
 const MAX_TOTAL_PAGES = 10;
 
-// Cache em memória da lista de envios: válido por 30 minutos. Melhor esforço —
+// Cache em memória da lista de envios: válido por 5 minutos. Melhor esforço —
 // instâncias serverless frias não guardam o cache, mas quando a instância está
 // quente as consultas repetidas respondem na hora, sem chamar a Super Frete.
 // O token NUNCA é guardado aqui: só a lista pública de envios (código, status,
-// transportadora), que já é o que a função devolve ao site.
-const ORDERS_CACHE_TTL_MS = 30 * 60 * 1000;
+// transportadora), que já é o que a função devolve ao site. O prazo é o mesmo
+// do resultado "live" (5 min): a lista é a fonte do resultado.
+const ORDERS_CACHE_TTL_MS = 5 * 60 * 1000;
 let ordersCache = { fetchedAt: 0, list: null };
 
-// Cache do resultado por código: "live" vale por 30 min; "not_found" vale
+// Cache do resultado por código: "live" vale por 5 min; "not_found" vale
 // só por 3 min, para um envio criado agora ser achado logo. Erro e falta
-// de token NÃO são cacheados.
-const RESULT_CACHE_TTL_MS = 30 * 60 * 1000;
+// de token NÃO são cacheados. Com fresh=1 na query, a leitura do cache é
+// ignorada e o resultado novo regrava o cache (ver o handler).
+const RESULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const NOT_FOUND_CACHE_TTL_MS = 3 * 60 * 1000;
 const resultCache = new Map();
 
@@ -375,13 +383,14 @@ function lastPageOf(body) {
 // senão, busca as páginas em paralelo (a API da Super Frete é lenta por
 // chamada; em paralelo o tempo total é o da página mais lenta, não a soma).
 // Só guarda no cache quando TODAS as páginas existentes vieram — lista
-// parcial nunca é cacheada, para não "esconder" um envio por 30 min.
+// parcial nunca é cacheada, para não "esconder" um envio por 5 min.
 // Retorna {list, complete}: complete=false quando alguma página que deveria
 // existir falhou (ou quando há mais páginas que o teto) — nesse caso um
 // código não achado devolve "error", nunca "not_found".
-async function fetchOrdersList(headers, deadline) {
+// Com forceRefresh=true, ignora o cache da lista e busca de novo.
+async function fetchOrdersList(headers, deadline, forceRefresh) {
   const now = Date.now();
-  if (ordersCache.list && now - ordersCache.fetchedAt < ORDERS_CACHE_TTL_MS) {
+  if (!forceRefresh && ordersCache.list && now - ordersCache.fetchedAt < ORDERS_CACHE_TTL_MS) {
     return { list: ordersCache.list, complete: true };
   }
   const all = [];
@@ -573,6 +582,11 @@ module.exports = async function handler(req, res) {
     return sendJson(res, 405, { state: "error" });
   }
 
+  // fresh=1 (botão "Atualizar agora" do site): ignora a leitura dos caches
+  // e força uma consulta nova à fonte, regravando o cache com o resultado.
+  // Sem ele, vale o cache de 5 min (live) / 3 min (not_found).
+  const fresh = String((req.query && req.query.fresh) || "").trim() === "1";
+
   // Entregas por aplicativo (sem ?code=): ?lalamove=, ?uber= e ?n99=.
   // Cada uma só consulta a API oficial quando as credenciais estão nas
   // variáveis de ambiente; sem elas, {state:"no_token"} e o site mostra
@@ -582,7 +596,7 @@ module.exports = async function handler(req, res) {
     if (!/^[A-Za-z0-9]{4,64}$/.test(lala)) return sendJson(res, 400, { state: "error" });
     const key = "lala:" + lala;
     const hit = resultCache.get(key);
-    if (hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
+    if (!fresh && hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
     const out = await fetchLalamoveOrder(lala, deadline);
     if (out.state === "live" || out.state === "not_found") cacheResult(key, out);
     return sendJson(res, 200, out);
@@ -592,7 +606,7 @@ module.exports = async function handler(req, res) {
     if (!/^[A-Za-z0-9_\-]{3,64}$/.test(uberId)) return sendJson(res, 400, { state: "error" });
     const key = "uber:" + uberId;
     const hit = resultCache.get(key);
-    if (hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
+    if (!fresh && hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
     const out = await fetchUberDirectDelivery(uberId, deadline);
     if (out.state === "live" || out.state === "not_found") cacheResult(key, out);
     return sendJson(res, 200, out);
@@ -602,7 +616,7 @@ module.exports = async function handler(req, res) {
     if (!/^[0-9]{6,20}$/.test(n99Id)) return sendJson(res, 400, { state: "error" });
     const key = "n99:" + n99Id;
     const hit = resultCache.get(key);
-    if (hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
+    if (!fresh && hit && Date.now() - hit.fetchedAt < hit.ttl) return sendJson(res, 200, hit.out);
     const out = await fetch99Order(n99Id, deadline);
     if (out.state === "live" || out.state === "not_found") cacheResult(key, out);
     return sendJson(res, 200, out);
@@ -618,9 +632,10 @@ module.exports = async function handler(req, res) {
     return sendJson(res, 200, { state: "no_token" });
   }
 
-  // Resultado em cache: "live" vale 30 min, "not_found" só 3 min.
+  // Resultado em cache: "live" vale 5 min, "not_found" só 3 min.
+  // Com fresh=1, pula a leitura do cache e consulta a Super Frete de novo.
   const cachedResult = resultCache.get(code);
-  if (cachedResult && Date.now() - cachedResult.fetchedAt < cachedResult.ttl) {
+  if (!fresh && cachedResult && Date.now() - cachedResult.fetchedAt < cachedResult.ttl) {
     return sendJson(res, 200, cachedResult.out);
   }
 
@@ -632,8 +647,9 @@ module.exports = async function handler(req, res) {
 
   try {
     // 1) Lista TODOS os envios da conta (com cache + páginas em paralelo)
-    // e procura pelo código de rastreio (ou pelo order_id).
-    const { list, complete } = await fetchOrdersList(headers, deadline);
+    // e procura pelo código de rastreio (ou pelo order_id). Com fresh=1,
+    // a lista também é buscada de novo, não só o resultado por código.
+    const { list, complete } = await fetchOrdersList(headers, deadline, fresh);
     let found = null;
     for (const order of list) {
       if (order && typeof order === "object" &&
