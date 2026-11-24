@@ -1040,16 +1040,20 @@
             clearTimeout(timer); syncBusy=false;
             var mapped=live.status;
             if(typeof mapped!=="number"||mapped<0||mapped>6){ fail(); return; }
+            /* O status manual do Adm vale quando está à frente da fonte ao
+               vivo (a fonte atrasa: o Adm sabe que o pedido já avançou antes
+               da transportadora registrar). O status exibido nunca volta atrás. */
+            var eff=Math.max(mapped,currentStatus);
             var nd={}; for(var k in data) nd[k]=data[k];
-            nd.v=2; nd.s=mapped; nd.atualizado=nowLabel;
+            nd.v=2; nd.s=eff; nd.atualizado=nowLabel;
             if(live.carrier) nd.transportadora=live.carrier;
             if(live.origin) nd.origem=live.origin;
             if(live.destination) nd.destino=live.destination;
             if(live.eta) nd.previsao=live.eta;
-            var changed=(mapped!==currentStatus);
+            var changed=(eff!==currentStatus);
             renderTracking(nd,true);
             var el2=$("resSync"); el2.style.display="block";
-            var msg=changed?"Status <b>atualizado automaticamente</b> a partir da Super Frete em "+nowLabel+".":"Status conferido na Super Frete em "+nowLabel+" — está atualizado.";
+            var msg=(mapped<currentStatus)?"Status mantido conforme atualização manual do Adm ("+escHtml(data.atualizado||nowLabel)+").":(changed?"Status <b>atualizado automaticamente</b> a partir da Super Frete em "+nowLabel+".":"Status conferido na Super Frete em "+nowLabel+" — está atualizado.");
             if(live.lastEvent&&live.lastEvent.label){
               msg+=" Última movimentação: "+escHtml(live.lastEvent.label);
               if(live.lastEvent.city) msg+=" — "+escHtml(live.lastEvent.city);
